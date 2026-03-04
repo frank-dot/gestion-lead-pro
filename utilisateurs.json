@@ -1,0 +1,11 @@
+{
+  "admin": {
+    "nom": "Administrateur",
+    "mot_de_passe": "8cc1238a18b1a5bec70e9c5ca7677338695258b31aa5afd028932f2d6b16937f",
+    "role": "admin",
+    "avatar": "👨‍💼",
+    "couleur": "#FF6B6B",
+    "date_creation": "2026-03-04T10:05:15.374480",
+    "derniere_connexion": "2026-03-04T10:05:15.375929"
+  }
+}
