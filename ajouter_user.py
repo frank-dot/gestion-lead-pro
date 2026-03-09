@@ -6,59 +6,6 @@ from collections import Counter
 import io
 import json
 import os
-import hashlib
-
-# ============================================================================
-# GESTION DES NOTIFICATIONS (version simple et fiable)
-# ============================================================================
-def show_popup(message, type="info", duration=None):
-    """
-    Affiche une notification dans l'interface Streamlit
-    type: "success", "info", "warning", "error"
-    duration: ignoré (les messages restent jusqu'à la prochaine interaction)
-    """
-    if type == "success":
-        st.success(f"✅ {message}")
-    elif type == "info":
-        st.info(f"ℹ️ {message}")
-    elif type == "warning":
-        st.warning(f"⚠️ {message}")
-    elif type == "error":
-        st.error(f"❌ {message}")
-
-# ============================================================================
-# NOUVEAU: Gestion de l'historique persistant
-# ============================================================================
-FICHIER_HISTORIQUE = "historique_exports.json"
-
-def charger_historique():
-    """Charge l'historique des exports depuis le fichier JSON"""
-    if os.path.exists(FICHIER_HISTORIQUE):
-        try:
-            with open(FICHIER_HISTORIQUE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                # Reconvertir les timestamps string en datetime
-                for export in data:
-                    export['timestamp'] = datetime.fromisoformat(export['timestamp'])
-                return data
-        except Exception as e:
-            print(f"Erreur chargement historique: {e}")
-            return []
-    return []
-
-def sauvegarder_historique():
-    """Sauvegarde l'historique des exports dans le fichier JSON"""
-    try:
-        historique_serializable = []
-        for export in st.session_state.historique_exports:
-            export_copy = export.copy()
-            export_copy['timestamp'] = export['timestamp'].isoformat()
-            historique_serializable.append(export_copy)
-        
-        with open(FICHIER_HISTORIQUE, 'w', encoding='utf-8') as f:
-            json.dump(historique_serializable, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Erreur sauvegarde historique: {e}")
 
 # ============================================================================
 # CONFIGURATION INITIALE
@@ -71,53 +18,6 @@ st.set_page_config(
 )
 
 # ============================================================================
-# AUTHENTIFICATION PAR MOT DE PASSE
-# ============================================================================
-FICHIER_UTILISATEURS = "utilisateurs.json"
-
-def hash_password(mot_de_passe):
-    """Hash un mot de passe avec SHA256"""
-    return hashlib.sha256(mot_de_passe.encode()).hexdigest()
-
-def charger_utilisateurs():
-    """Charge les utilisateurs depuis le fichier JSON"""
-    if os.path.exists(FICHIER_UTILISATEURS):
-        try:
-            with open(FICHIER_UTILISATEURS, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
-
-def sauvegarder_utilisateurs(utilisateurs):
-    """Sauvegarde les utilisateurs dans le fichier JSON"""
-    with open(FICHIER_UTILISATEURS, 'w', encoding='utf-8') as f:
-        json.dump(utilisateurs, f, indent=2, ensure_ascii=False)
-
-def creer_utilisateur_defaut():
-    """Crée un utilisateur admin par défaut si aucun n'existe"""
-    utilisateurs = charger_utilisateurs()
-    if not utilisateurs:
-        utilisateurs["admin"] = {
-            "nom": "Administrateur",
-            "mot_de_passe": hash_password("admin123"),
-            "role": "admin",
-            "date_creation": datetime.now().isoformat()
-        }
-        sauvegarder_utilisateurs(utilisateurs)
-    return utilisateurs
-
-def authentifier(identifiant, mot_de_passe):
-    """Vérifie les identifiants de connexion"""
-    utilisateurs = charger_utilisateurs()
-    
-    if identifiant in utilisateurs:
-        if utilisateurs[identifiant]["mot_de_passe"] == hash_password(mot_de_passe):
-            return True, utilisateurs[identifiant]
-    
-    return False, None
-
-# ============================================================================
 # INITIALISATION DE LA SESSION
 # ============================================================================
 def init_session_state():
@@ -126,14 +26,12 @@ def init_session_state():
         'authentifie': False,
         'page': 'login',
         'nom': '',
-        'identifiant': '',
-        'role': 'user',
         'df_original': None,
         'df_travail': None,
         'nom_fichier': '',
         'historique_actions': [],
         'position_historique': -1,
-        'historique_exports': [],  # Sera chargé depuis le fichier
+        'historique_exports': [],
         'tableau_de_bord': {
             'total_exports': 0,
             'total_lignes_exportees': 0,
@@ -145,26 +43,6 @@ def init_session_state():
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
-    
-    # NOUVEAU: Charger l'historique persistant au démarrage
-    if 'historique_exports_charge' not in st.session_state:
-        historique_charge = charger_historique()
-        if historique_charge:
-            st.session_state.historique_exports = historique_charge
-            # Recalculer le tableau de bord à partir de l'historique chargé
-            st.session_state.tableau_de_bord['total_exports'] = len(st.session_state.historique_exports)
-            st.session_state.tableau_de_bord['total_lignes_exportees'] = sum(e['lignes'] for e in st.session_state.historique_exports)
-            
-            # Compter les formats
-            formats = {}
-            for e in st.session_state.historique_exports:
-                formats[e['format']] = formats.get(e['format'], 0) + 1
-            st.session_state.tableau_de_bord['formats_utilises'] = formats
-            
-            if st.session_state.historique_exports:
-                st.session_state.tableau_de_bord['dernier_export'] = st.session_state.historique_exports[-1]
-        
-        st.session_state.historique_exports_charge = True
 
 init_session_state()
 
@@ -195,9 +73,8 @@ def refaire():
         return st.session_state.historique_actions[st.session_state.position_historique]['dataframe'].copy()
     return st.session_state.df_travail.copy()
 
-# NOUVEAU: Version modifiée d'enregistrement d'export avec sauvegarde persistante
 def enregistrer_export(nom_fichier, format_export, lignes, colonnes):
-    """Enregistre un export dans l'historique et sauvegarde dans le fichier"""
+    """Enregistre un export dans l'historique"""
     export = {
         'id': len(st.session_state.historique_exports) + 1,
         'timestamp': datetime.now(),
@@ -206,8 +83,7 @@ def enregistrer_export(nom_fichier, format_export, lignes, colonnes):
         'lignes': lignes,
         'colonnes': colonnes,
         'fichier_source': st.session_state.nom_fichier,
-        'utilisateur': st.session_state.identifiant,
-        'taille_ko': 0
+        'taille_ko': 0  # Sera calculé après l'export
     }
     
     st.session_state.historique_exports.append(export)
@@ -217,42 +93,27 @@ def enregistrer_export(nom_fichier, format_export, lignes, colonnes):
     st.session_state.tableau_de_bord['total_lignes_exportees'] += lignes
     st.session_state.tableau_de_bord['formats_utilises'][format_export] = st.session_state.tableau_de_bord['formats_utilises'].get(format_export, 0) + 1
     st.session_state.tableau_de_bord['dernier_export'] = export
-    
-    # NOUVEAU: Sauvegarder dans le fichier
-    sauvegarder_historique()
-    
-    # NOUVEAU: Afficher un pop-up de confirmation
-    show_popup(f"✅ Export enregistré: {lignes} lignes", "success", 3)
 
-def se_connecter(identifiant, user_info):
+def se_connecter():
     """Gère la connexion"""
     st.session_state.authentifie = True
-    st.session_state.nom = user_info.get("nom", identifiant)
-    st.session_state.identifiant = identifiant
-    st.session_state.role = user_info.get("role", "user")
     st.session_state.page = "accueil"
-    show_popup(f"👋 Bonjour {st.session_state.nom} !", "success", 2)
 
 def se_deconnecter():
     """Gère la déconnexion"""
     st.session_state.authentifie = False
     st.session_state.page = "login"
-    st.session_state.nom = ''
-    st.session_state.identifiant = ''
-    st.session_state.role = 'user'
     st.session_state.df_original = None
     st.session_state.df_travail = None
     st.session_state.nom_fichier = ''
     st.session_state.historique_actions = []
     st.session_state.position_historique = -1
-    show_popup("👋 À bientôt !", "info", 2)
+    # On garde l'historique des exports et le tableau de bord
 
 def sauvegarder_session():
     """Sauvegarde la session dans un fichier JSON"""
     session_data = {
         'nom': st.session_state.nom,
-        'identifiant': st.session_state.identifiant,
-        'role': st.session_state.role,
         'date_sauvegarde': datetime.now().strftime('%d/%m/%Y %H:%M:%S'),
         'fichier_actuel': st.session_state.nom_fichier,
         'lignes': len(st.session_state.df_travail) if st.session_state.df_travail is not None else 0,
@@ -263,7 +124,7 @@ def sauvegarder_session():
                 'fichier': e['nom_fichier'],
                 'format': e['format'],
                 'lignes': e['lignes']
-            } for e in st.session_state.historique_exports[-10:]
+            } for e in st.session_state.historique_exports[-10:]  # Derniers 10 exports
         ],
         'tableau_de_bord': st.session_state.tableau_de_bord
     }
@@ -275,10 +136,9 @@ def charger_session(session_json):
     try:
         data = json.loads(session_json)
         st.session_state.nom = data.get('nom', 'Utilisateur')
-        show_popup(f"✅ Session chargée: {data.get('date_sauvegarde', '')}", "success", 3)
+        st.success(f"✅ Session chargée: {data.get('date_sauvegarde', '')}")
         return True
     except:
-        show_popup("❌ Erreur chargement session", "error", 3)
         return False
 
 def aller_a(page):
@@ -383,8 +243,6 @@ def afficher_barre_laterale():
     with st.sidebar:
         st.image("https://img.icons8.com/fluency/96/user-male-circle.png", width=80)
         st.markdown(f"### 👤 {st.session_state.get('nom', 'Utilisateur')}")
-        if st.session_state.get('identifiant'):
-            st.markdown(f"*@{st.session_state.identifiant}*")
         
         st.markdown("---")
         st.markdown(f"📅 {datetime.now().strftime('%d/%m/%Y')}")
@@ -405,26 +263,13 @@ def afficher_barre_laterale():
                         df = annuler()
                         if df is not None:
                             st.session_state.df_travail = df
-                            show_popup("↩️ Action annulée", "info", 2)
                             st.rerun()
                 with col2:
                     if st.button("↪️ Refaire", use_container_width=True):
                         df = refaire()
                         if df is not None:
                             st.session_state.df_travail = df
-                            show_popup("↪️ Action rétablie", "info", 2)
                             st.rerun()
-            
-            # NOUVEAU: Section Réinitialisation
-            if st.session_state.df_original is not None and st.session_state.df_travail is not None:
-                if len(st.session_state.df_travail) != len(st.session_state.df_original):
-                    st.markdown("---")
-                    st.markdown("**🔄 Réinitialisation**")
-                    if st.button("↩️ Revenir au fichier original", use_container_width=True, type="primary"):
-                        st.session_state.df_travail = st.session_state.df_original.copy()
-                        sauvegarder_etat(st.session_state.df_travail)
-                        show_popup("✅ Fichier original restauré", "success", 2)
-                        st.rerun()
         
         # Section Sauvegarde
         st.markdown("---")
@@ -443,7 +288,7 @@ def afficher_barre_laterale():
         if uploaded_session is not None:
             session_data = uploaded_session.read().decode('utf-8')
             if charger_session(session_data):
-                st.rerun()
+                st.success("✅ Session chargée!")
         
         st.markdown("---")
         if st.button("🚪 Se déconnecter", use_container_width=True):
@@ -493,64 +338,6 @@ def afficher_tableau_de_bord():
         if st.session_state.tableau_de_bord['dernier_export']:
             dernier = st.session_state.tableau_de_bord['dernier_export']
             st.metric("Dernier export", dernier['format'])
-
-def afficher_gestion_utilisateurs():
-    """Affiche l'interface de gestion des utilisateurs"""
-    st.subheader("👥 Gestion des utilisateurs")
-    
-    utilisateurs = charger_utilisateurs()
-    
-    # Afficher la liste des utilisateurs existants
-    st.write("### Utilisateurs existants")
-    
-    for identifiant, infos in utilisateurs.items():
-        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
-        with col1:
-            st.write(f"**{infos['nom']}**")
-        with col2:
-            st.write(f"@{identifiant}")
-        with col3:
-            role = "🛡️ Admin" if infos['role'] == 'admin' else "👤 User"
-            st.write(role)
-        with col4:
-            if identifiant != "admin":  # Ne pas pouvoir supprimer admin
-                if st.button("🗑️", key=f"del_{identifiant}"):
-                    del utilisateurs[identifiant]
-                    sauvegarder_utilisateurs(utilisateurs)
-                    show_popup(f"✅ Utilisateur {identifiant} supprimé", "success", 2)
-                    st.rerun()
-        st.markdown("---")
-    
-    # Formulaire d'ajout
-    with st.expander("➕ Ajouter un nouvel utilisateur"):
-        with st.form("form_ajout_utilisateur"):
-            new_id = st.text_input("Identifiant")
-            new_nom = st.text_input("Nom complet")
-            new_mdp = st.text_input("Mot de passe", type="password")
-            new_mdp2 = st.text_input("Confirmer mot de passe", type="password")
-            new_role = st.selectbox("Rôle", ["user", "admin"])
-            
-            if st.form_submit_button("Créer l'utilisateur"):
-                if not new_id or not new_nom or not new_mdp:
-                    show_popup("Tous les champs sont requis", "warning", 3)
-                elif new_mdp != new_mdp2:
-                    show_popup("Les mots de passe ne correspondent pas", "error", 3)
-                elif len(new_mdp) < 4:
-                    show_popup("Le mot de passe doit faire au moins 4 caractères", "warning", 3)
-                else:
-                    utilisateurs = charger_utilisateurs()
-                    if new_id in utilisateurs:
-                        show_popup("Cet identifiant existe déjà", "error", 3)
-                    else:
-                        utilisateurs[new_id] = {
-                            "nom": new_nom,
-                            "mot_de_passe": hash_password(new_mdp),
-                            "role": new_role,
-                            "date_creation": datetime.now().isoformat()
-                        }
-                        sauvegarder_utilisateurs(utilisateurs)
-                        show_popup(f"✅ Utilisateur {new_id} créé avec succès", "success", 3)
-                        st.rerun()
     
     # Historique des exports
     if st.session_state.historique_exports:
@@ -560,13 +347,12 @@ def afficher_gestion_utilisateurs():
         historique_df = pd.DataFrame([
             {
                 'Date': e['timestamp'].strftime('%d/%m/%Y %H:%M'),
-                'Utilisateur': e.get('utilisateur', ''),
                 'Fichier': e['nom_fichier'],
                 'Format': e['format'],
                 'Lignes': e['lignes'],
                 'Colonnes': e['colonnes'],
                 'Source': e['fichier_source']
-            } for e in reversed(st.session_state.historique_exports[-20:])
+            } for e in reversed(st.session_state.historique_exports[-20:])  # Derniers 20 exports
         ])
         
         st.dataframe(historique_df, use_container_width=True)
@@ -583,172 +369,28 @@ def afficher_gestion_utilisateurs():
 # ============================================================================
 
 # ----------------------------------------------------------------------------
-# PAGE DE CONNEXION MODERNE
+# PAGE DE CONNEXION
 # ----------------------------------------------------------------------------
 if st.session_state.page == "login":
-    # Créer l'utilisateur par défaut au premier lancement
-    creer_utilisateur_defaut()
-    
     st.markdown("""
         <style>
         .stApp {
-            background: linear-gradient(145deg, #4158D0 0%, #C850C0 46%, #FFCC70 100%);
-            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         }
-        
-        .login-card {
+        .login-container {
             background: white;
-            border-radius: 20px;
-            box-shadow: 0 20px 50px rgba(0,0,0,0.2);
-            padding: 3rem 2.5rem;
-            width: 100%;
-            max-width: 450px;
-            margin: 3rem auto;
-            animation: fadeIn 0.5s ease;
+            padding: 2rem;
+            border-radius: 10px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+            max-width: 400px;
+            margin: 5rem auto;
         }
-        
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(-20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        
-        .login-header {
+        .login-title {
+            color: #333;
             text-align: center;
-            margin-bottom: 2.5rem;
-        }
-        
-        .login-header h1 {
-            font-size: 2.2rem;
-            font-weight: 700;
-            background: linear-gradient(145deg, #4158D0 0%, #C850C0 46%, #FFCC70 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 0.5rem;
-        }
-        
-        .login-header p {
-            color: #888;
-            font-size: 0.95rem;
-        }
-        
-        .input-group {
-            margin-bottom: 1.5rem;
-        }
-        
-        .input-group label {
-            display: block;
-            margin-bottom: 0.5rem;
-            color: #fffff;
-            font-weight: 500;
-            font-size: 0.95rem;
-        }
-        
-        .input-group input {
-            width: 100%;
-            padding: 0.9rem 1rem;
-            border: 2px solid #e0e0e0;
-            border-radius: 12px;
-            font-size: 1rem;
-            transition: all 0.3s ease;
-            outline: none;
-        }
-        
-        .input-group input:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102,126,234,0.1);
-        }
-        
-        .input-group input::placeholder {
-            color: #bbb;
-            font-size: 0.95rem;
-        }
-        
-        .checkbox-group {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin: 1rem 0 2rem 0;
-        }
-        
-        .checkbox-label {
-            display: flex;
-            align-items: center;
-            color: #fffff;
-            font-size: 0.95rem;
-            cursor: pointer;
-        }
-        
-        .checkbox-label input {
-            margin-right: 0.5rem;
-            accent-color: #667eea;
-            width: 18px;
-            height: 18px;
-        }
-        
-        .forgot-link {
-            color: #667eea;
-            text-decoration: none;
-            font-size: 0.95rem;
-            font-weight: 500;
-            transition: color 0.3s ease;
-        }
-        
-        .forgot-link:hover {
-            color: #764ba2;
-            text-decoration: underline;
-        }
-        
-        .login-btn {
-            width: 100%;
-            padding: 1rem;
-            background: linear-gradient(145deg, #4158D0 0%, #C850C0 46%, #FFCC70 100%);
-            color: white;
-            border: none;
-            border-radius: 12px;
-            font-size: 1.1rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            box-shadow: 0 10px 20px rgba(102,126,234,0.3);
-            margin-bottom: 1.5rem;
-        }
-        
-        .login-btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 15px 30px rgba(102,126,234,0.4);
-        }
-        
-        .login-btn:active {
-            transform: translateY(0);
-        }
-        
-        .demo-info {
-            text-align: center;
-            padding: 1rem;
-            background: linear-gradient(145deg, #4158D0 0%, #C850C0 46%, #FFCC70 100%);
-            border-radius: 12px;
-            border: 1px dashed #667eea;
-        }
-        
-        .demo-info p {
-            margin: 0.3rem 0;
-            color: #666;
-            font-size: 0.9rem;
-        }
-        
-        .demo-info code {
-            background: #e9ecef;
-            padding: 0.2rem 0.5rem;
-            border-radius: 6px;
-            color: #667eea;
-            font-weight: 600;
-        }
-        
-        .footer-text {
-            text-align: center;
-            margin-top: 2rem;
-            color: #FFFFFF;
-            font-size: 0.85rem;
+            margin-bottom: 2rem;
+            font-size: 2rem;
+            font-weight: bold;
         }
         </style>
     """, unsafe_allow_html=True)
@@ -756,64 +398,19 @@ if st.session_state.page == "login":
     with st.container():
         col1, col2, col3 = st.columns([1, 2, 1])
         with col2:
-            st.markdown("""
-                <div class="login-card">
-                    <div class="login-header">
-                        <h1>🔐 Gestion Leads Pro</h1>
-                        <p>Connectez-vous pour accéder à votre espace</p>
-                    </div>
-            """, unsafe_allow_html=True)
+            st.markdown('<div class="login-container">', unsafe_allow_html=True)
+            st.markdown('<p class="login-title">🔐 Gestion Contacts Pro</p>', unsafe_allow_html=True)
             
             with st.form("login_form"):
-                # Champ Username
-                st.markdown("""
-                    <div class="input-group">
-                        <label>Username</label>
-                    </div>
-                """, unsafe_allow_html=True)
-                identifiant = st.text_input(" ", placeholder="Entrez votre identifiant", label_visibility="collapsed")
-                
-                # Champ Password
-                st.markdown("""
-                    <div class="input-group">
-                        <label>Password</label>
-                    </div>
-                """, unsafe_allow_html=True)
-                mot_de_passe = st.text_input(" ", type="password", placeholder="Entrez votre mot de passe", label_visibility="collapsed")
-                
-                # Remember me & Forgot Password
-                st.markdown("""
-                    <div class="checkbox-group">
-                        <label class="checkbox-label">
-                            <input type="checkbox"> Remember me
-                        </label>
-                        <a href="#" class="forgot-link">Forget Password?</a>
-                    </div>
-                """, unsafe_allow_html=True)
-                
-                # Bouton Login
-                submitted = st.form_submit_button("LOGIN", use_container_width=True)
+                nom = st.text_input("Nom d'utilisateur (optionnel)", placeholder="Entrez votre nom")
+                submitted = st.form_submit_button("🚀 SE CONNECTER", use_container_width=True)
                 
                 if submitted:
-                    if identifiant and mot_de_passe:
-                        success, user_info = authentifier(identifiant, mot_de_passe)
-                        if success:
-                            se_connecter(identifiant, user_info)
-                            st.rerun()
-                        else:
-                            show_popup("❌ Identifiant ou mot de passe incorrect", "error", 3)
-                    else:
-                        show_popup("⚠️ Veuillez remplir tous les champs", "warning", 3)
+                    st.session_state.nom = nom if nom else "Visiteur"
+                    se_connecter()
+                    st.rerun()
             
-            # Informations de démo
-            st.markdown("""
-                
-                <div class="footer-text">
-                    © 2026 AETECH SOLUTIONS SARL. Tous droits réservés.
-                </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown('</div>', unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------------
 # PAGE D'ACCUEIL
@@ -837,19 +434,14 @@ elif st.session_state.page == "accueil":
         </style>
     """, unsafe_allow_html=True)
     
-    st.markdown(f"""
+    st.markdown("""
         <div class="welcome-header">
-            <div class="welcome-title">📋 Bienvenue {st.session_state.nom} !</div>
+            <div class="welcome-title">📋 Bienvenue sur Gestion Contacts Pro</div>
         </div>
     """, unsafe_allow_html=True)
     
-    # Tableau de bord
+    # Tableau de bord sur l'accueil
     afficher_tableau_de_bord()
-    
-    # Gestion des utilisateurs (visible seulement pour admin)
-    if st.session_state.role == "admin":
-        with st.expander("🛡️ Administration - Gestion des utilisateurs", expanded=False):
-            afficher_gestion_utilisateurs()
     
     st.markdown("---")
     st.subheader("🚀 Modules disponibles")
@@ -942,14 +534,14 @@ elif st.session_state.page == "import":
                 st.warning(f"⚠️ Colonnes en double: {', '.join(doublons)}")
                 if st.button("🔄 Renommer"):
                     df = renommer_colonnes_doublons(df)
-                    show_popup("✅ Colonnes renommées automatiquement", "success", 2)
+                    st.success("✅ Colonnes renommées!")
             
             st.session_state.df_original = df.copy()
             st.session_state.df_travail = df.copy()
             st.session_state.nom_fichier = uploaded_file.name
             sauvegarder_etat(df)
             
-            show_popup(f"✅ Fichier chargé: {len(df)} lignes, {len(df.columns)} colonnes", "success", 3)
+            st.success(f"✅ Fichier chargé: {len(df)} lignes, {len(df.columns)} colonnes")
             st.dataframe(df.head(10), use_container_width=True)
             
             with st.expander("📋 Voir toutes les colonnes"):
@@ -980,7 +572,7 @@ elif st.session_state.page == "telephone":
         
         col_left, col_right = st.columns([1, 1])
         
-        with col_left:  # ← Maintenant bien indenté sous le if
+        with col_left:
             st.subheader("1. Choisir la colonne")
             
             cols_tel = [col for col in df.columns if any(
@@ -1009,10 +601,10 @@ elif st.session_state.page == "telephone":
                     lambda x: formater_telephone(x, format_map[format_tel])
                 )
                 sauvegarder_etat(st.session_state.df_travail)
-                show_popup("✅ Téléphones formatés avec succès", "success")
-                # Le rerun n'est pas nécessaire, le dataframe est déjà modifié
+                st.success("✅ Téléphones formatés!")
+                st.rerun()
         
-        with col_right:  # ← Maintenant bien indenté sous le if
+        with col_right:
             st.subheader("Aperçu avant/après")
             
             aperçu = df[[col_telephone]].head(10).copy()
@@ -1084,7 +676,7 @@ elif st.session_state.page == "doublons":
                     st.session_state.df_travail = st.session_state.df_travail.drop_duplicates()
                     apres = len(st.session_state.df_travail)
                     sauvegarder_etat(st.session_state.df_travail)
-                    show_popup(f"✅ {avant - apres} doublons supprimés! {apres} lignes restantes", "success", 3)
+                    st.success(f"✅ {avant - apres} doublons supprimés! {apres} lignes restantes")
                     st.rerun()
             else:
                 st.success("✅ Aucun doublon exact détecté")
@@ -1113,7 +705,7 @@ elif st.session_state.page == "doublons":
                     st.session_state.df_travail = st.session_state.df_travail.drop_duplicates(subset=[col_doublons])
                     apres = len(st.session_state.df_travail)
                     sauvegarder_etat(st.session_state.df_travail)
-                    show_popup(f"✅ {avant - apres} doublons supprimés! {apres} lignes restantes", "success", 3)
+                    st.success(f"✅ {avant - apres} doublons supprimés! {apres} lignes restantes")
                     st.rerun()
             else:
                 st.success(f"✅ Aucun doublon sur la colonne '{col_doublons}'")
@@ -1364,12 +956,12 @@ elif st.session_state.page == "filtre":
                             aperçu = df[masque_filtre].head(10)
                             st.dataframe(aperçu, use_container_width=True)
                         
-                        #if st.button("✅ CRÉER UN NOUVEAU FICHIER", use_container_width=True, type="primary"):
-                         #   df_filtre = df[masque_filtre].copy()
-                         #  st.session_state.df_travail = df_filtre
-                         #   sauvegarder_etat(st.session_state.df_travail)
-                         #   show_popup(f"✅ Nouveau fichier créé avec {nb_resultats} contacts!", "success", 3)
-                         #   st.rerun()
+                        if st.button("✅ CRÉER UN NOUVEAU FICHIER", use_container_width=True, type="primary"):
+                            df_filtre = df[masque_filtre].copy()
+                            st.session_state.df_travail = df_filtre
+                            sauvegarder_etat(st.session_state.df_travail)
+                            st.success(f"✅ Nouveau fichier créé avec {nb_resultats} contacts!")
+                            st.rerun()
                     else:
                         st.warning("⚠️ Aucun contact trouvé")
                         
@@ -1383,79 +975,9 @@ elif st.session_state.page == "filtre":
             
             st.metric("Valeurs non vides", df[col_filtre].notna().sum())
             st.metric("Valeurs uniques", df[col_filtre].nunique())
-            
-            # NOUVEAU: Bouton pour réinitialiser depuis l'original
-            st.markdown("---")
-            st.subheader("🔄 Options avancées")
-            if st.button("🔄 Partir du fichier original", use_container_width=True):
-                st.session_state.df_travail = st.session_state.df_original.copy()
-                show_popup("✅ Retour au fichier original", "info", 2)
-                st.rerun()
-            
-            # ======= SECTION FILTRE ET BOUTONS =======
-            st.markdown("---")
-
-            # Initialiser les variables
-            nb_resultats = 0
-            masque_filtre = None
-
-            # Calculer le filtre si possible
-            if 'filtre_func' in locals() and filtre_func is not None:
-                try:
-                    masque_filtre = df[col_filtre].apply(filtre_func)
-                    nb_resultats = masque_filtre.sum()
-                    
-                    # AFFICHAGE UNIQUE des métriques
-                    col1, col2, col3 = st.columns(3)
-                    with col1:
-                        st.metric("Contacts trouvés", nb_resultats)
-                    with col2:
-                        st.metric("Pourcentage", f"{nb_resultats/len(df)*100:.1f}%")
-                    with col3:
-                        st.metric("Total lignes", len(df))
-                    
-                    # Aperçu (optionnel)
-                    if nb_resultats > 0:
-                        if st.checkbox("👀 Voir l'aperçu des résultats", key="apercu_resultats"):
-                            aperçu = df[masque_filtre].head(10)
-                            st.dataframe(aperçu, use_container_width=True)
-                        
-                except Exception as e:
-                    st.error(f"Erreur: {e}")
-
-            # Initialiser le flag de session
-            if 'fichier_filtre_cree' not in st.session_state:
-                st.session_state.fichier_filtre_cree = False
-        
-            # ========= BOUTON UNIQUE =========
-            st.markdown("---")
-
-            # Un SEUL bouton pour créer ET indiquer la création
-            if st.button("✅ CRÉER UN NOUVEAU FICHIER", 
-                        use_container_width=True, 
-                        type="primary",
-                        key="btn_creer_fichier_unique"):
-                
-                # Vérifier que masque_filtre existe
-                if 'masque_filtre' in locals() and masque_filtre is not None:
-                    df_filtre = df[masque_filtre].copy()
-                    st.session_state.df_travail = df_filtre
-                    sauvegarder_etat(st.session_state.df_travail)
-                    show_popup("✅ Fichier créé avec succès !", "success")
-                    st.session_state.fichier_cree = True
-                    st.rerun()
-                else:
-                    st.warning("⚠️ Aucun filtre appliqué")
-
-            # Message de confirmation (pas un deuxième bouton)
-            if st.session_state.get('fichier_cree', False):
-                st.success("✅ Fichier prêt ! Rendez-vous dans le module Export")
-                if st.button("📤 Aller à l'export",  use_container_width=True, 
-                     type="primary",
-                     key="btn_export_final"):
-                    
-                    st.session_state.fichier_cree = False
-                    aller_a("export")
+    
+    else:
+        st.warning("⚠️ Aucun fichier chargé.")
 
 # ----------------------------------------------------------------------------
 # PAGE EXPORT
@@ -1558,7 +1080,8 @@ elif st.session_state.page == "export":
                     if format_export == "CSV":
                         csv_data = df_export.to_csv(index=False, sep=sep, encoding=enc)
                         
-                        # Enregistrer dans l'historique (version modifiée)
+                        # Enregistrer dans l'historique
+                        taille_ko = len(csv_data.encode('utf-8')) / 1024
                         enregistrer_export(nom_complet + ".csv", "CSV", len(df_export), len(df_export.columns))
                         
                         st.download_button(
@@ -1579,7 +1102,6 @@ elif st.session_state.page == "export":
                                 resume_data = {
                                     'Information': [
                                         "Date d'export",
-                                        'Utilisateur',
                                         'Fichier source',
                                         'Lignes',
                                         'Colonnes',
@@ -1588,7 +1110,6 @@ elif st.session_state.page == "export":
                                     ],
                                     'Valeur': [
                                         datetime.now().strftime('%d/%m/%Y %H:%M'),
-                                        st.session_state.identifiant,
                                         st.session_state.nom_fichier,
                                         len(df_export),
                                         len(df_export.columns),
@@ -1599,6 +1120,7 @@ elif st.session_state.page == "export":
                                 resume_df = pd.DataFrame(resume_data)
                                 resume_df.to_excel(writer, index=False, sheet_name='Résumé')
                         
+                        taille_ko = len(output.getvalue()) / 1024
                         enregistrer_export(nom_complet + ".xlsx", "Excel", len(df_export), len(df_export.columns))
                         
                         st.download_button(
@@ -1617,6 +1139,7 @@ elif st.session_state.page == "export":
                         else:
                             json_data = df_export.to_json(orient='table', indent=2, force_ascii=False)
                         
+                        taille_ko = len(json_data.encode('utf-8')) / 1024
                         enregistrer_export(nom_complet + ".json", "JSON", len(df_export), len(df_export.columns))
                         
                         st.download_button(
@@ -1628,6 +1151,7 @@ elif st.session_state.page == "export":
                         )
                     
                     st.success("✅ Export généré avec succès!")
+                    st.info("👉 Retournez à l'accueil pour voir le tableau de bord mis à jour")
                     
                 except Exception as e:
                     st.error(f"❌ Erreur: {e}")

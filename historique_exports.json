@@ -1,0 +1,24 @@
+[
+  {
+    "id": 1,
+    "timestamp": "2026-03-09T08:23:44.472753",
+    "nom_fichier": "contacts_20260309_082344.csv",
+    "format": "CSV",
+    "lignes": 80,
+    "colonnes": 11,
+    "fichier_source": "LEAD.8993.122.xlsx",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 2,
+    "timestamp": "2026-03-09T16:26:58.925051",
+    "nom_fichier": "contacts_20260309_162658.csv",
+    "format": "CSV",
+    "lignes": 178,
+    "colonnes": 10,
+    "fichier_source": "VELOG net_20260309_122836.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  }
+]

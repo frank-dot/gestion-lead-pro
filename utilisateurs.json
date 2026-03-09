@@ -1,11 +1,8 @@
 {
   "admin": {
     "nom": "Administrateur",
-    "mot_de_passe": "8cc1238a18b1a5bec70e9c5ca7677338695258b31aa5afd028932f2d6b16937f",
+    "mot_de_passe": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
     "role": "admin",
-    "avatar": "👨‍💼",
-    "couleur": "#FF6B6B",
-    "date_creation": "2026-03-04T10:05:15.374480",
-    "derniere_connexion": "2026-03-04T10:05:15.375929"
+    "date_creation": "2026-03-04T12:49:44.696774"
   }
 }
