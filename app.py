@@ -1,3 +1,4 @@
+from reputation_checker import ReputationChecker
 import streamlit as st
 import pandas as pd
 import re
@@ -7,7 +8,8 @@ import io
 import json
 import os
 import hashlib
-
+import time
+import random
 # ============================================================================
 # GESTION DES NOTIFICATIONS (version simple et fiable)
 # ============================================================================
@@ -854,14 +856,14 @@ elif st.session_state.page == "accueil":
     st.markdown("---")
     st.subheader("🚀 Modules disponibles")
     
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
         afficher_carte_fonctionnalite("📂", "IMPORT", "#3498db", "import")
     
     with col2:
         disabled = st.session_state.df_original is None
-        afficher_carte_fonctionnalite("📞", "TÉLÉPHONE", "#2ecc71", "telephone", disabled)
+        afficher_carte_fonctionnalite("📞", "TÉLÉPHONE", "#07822a", "telephone", disabled)
     
     with col3:
         disabled = st.session_state.df_original is None
@@ -869,8 +871,10 @@ elif st.session_state.page == "accueil":
     
     with col4:
         disabled = st.session_state.df_original is None
-        afficher_carte_fonctionnalite("🔍", "FILTRE", "#f39c12", "filtre", disabled)
-    
+        afficher_carte_fonctionnalite("🔍", "FILTRE", "#4e12f3", "filtre", disabled)
+    with col5:
+        disabled = st.session_state.df_original is None
+        afficher_carte_fonctionnalite("🛡️", "VÉRIF SDA", "#740770", "verification_sda", disabled)
     col1, col2, col3 = st.columns(3)
     with col2:
         disabled = st.session_state.df_original is None
@@ -878,10 +882,10 @@ elif st.session_state.page == "accueil":
             aller_a("export")
 
 # ----------------------------------------------------------------------------
-# PAGE IMPORT
+# PAGE IMPORT (avec mode simple et mode fusion)
 # ----------------------------------------------------------------------------
 elif st.session_state.page == "import":
-    st.title("📂 Import de fichier")
+    st.title("📂 Import et Fusion de fichiers")
     
     col1, col2 = st.columns([1, 5])
     with col1:
@@ -890,77 +894,251 @@ elif st.session_state.page == "import":
     
     st.markdown("---")
     
-    uploaded_file = st.file_uploader("Choisir un fichier CSV ou Excel", type=['csv', 'xlsx'])
+    # Choix du mode d'import
+    mode_import = st.radio(
+        "Mode d'import",
+        ["📄 Fichier unique", "🔗 Fusionner plusieurs fichiers"],
+        horizontal=True
+    )
     
-    if uploaded_file is not None:
-        try:
-            if uploaded_file.name.endswith('.csv'):
-                mode = st.radio(
-                    "Mode d'import",
-                    ["🔍 Auto-détection", "✋ Manuel"],
-                    horizontal=True
-                )
-                
-                if mode == "🔍 Auto-détection":
-                    with st.spinner("🔍 Détection automatique en cours..."):
+    # ===== MODE FICHIER UNIQUE =====
+    if mode_import == "📄 Fichier unique":
+        uploaded_file = st.file_uploader(
+            "Choisir un fichier CSV ou Excel",
+            type=['csv', 'xlsx', 'xls'],
+            key="file_uploader_single"
+        )
+        
+        if uploaded_file is not None:
+            try:
+                if uploaded_file.name.endswith('.csv'):
+                    # Analyser la structure
+                    uploaded_file.seek(0)
+                    sample = pd.read_csv(uploaded_file, nrows=2, header=None)
+                    nb_colonnes = len(sample.columns)
+                    uploaded_file.seek(0)
+                    
+                    # CAS: Une seule colonne (liste de numéros)
+                    if nb_colonnes == 1:
+                        st.info("📁 Format détecté : liste de numéros")
                         enc, sep = detecter_encodage_et_separateur(uploaded_file)
-                        
                         if enc and sep:
-                            st.success("✅ Détection réussie!")
-                            
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.info(f"📌 Encodage détecté: **{enc}**")
-                            with col2:
-                                sep_text = "Virgule (,)" if sep == ',' else "Point-virgule (;)" if sep == ';' else "Tabulation"
-                                st.info(f"📌 Séparateur détecté: **{sep_text}**")
-                            
-                            uploaded_file.seek(0)
+                            df = pd.read_csv(uploaded_file, sep=sep, encoding=enc, header=None, names=['numero'])
+                            st.success(f"✅ {len(df)} numéros chargés")
+                        else:
+                            st.error("❌ Erreur de détection")
+                            st.stop()
+                    
+                    # CAS: Plusieurs colonnes (tableau normal)
+                    else:
+                        st.info(f"📁 Format détecté : tableau ({nb_colonnes} colonnes)")
+                        enc, sep = detecter_encodage_et_separateur(uploaded_file)
+                        if enc and sep:
                             df = pd.read_csv(uploaded_file, sep=sep, encoding=enc)
                         else:
-                            st.error("❌ Détection automatique échouée")
-                            st.info("Passez en mode manuel")
+                            st.error("❌ Erreur de détection")
                             st.stop()
                 
-                else:
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        sep_choice = st.radio("Séparateur", ["Virgule (,)", "Point-virgule (;)"])
-                    with col2:
-                        enc_choice = st.radio("Encodage", ["latin1", "cp1252", "utf-8"])
+                else:  # Fichier Excel
+                    sample = pd.read_excel(uploaded_file, nrows=2, header=None)
+                    nb_colonnes = len(sample.columns)
                     
-                    sep_char = ',' if sep_choice == "Virgule (,)" else ';'
+                    if nb_colonnes == 1:
+                        st.info("📁 Format détecté : liste de numéros")
+                        df = pd.read_excel(uploaded_file, header=None, names=['numero'])
+                    else:
+                        st.info(f"📁 Format détecté : tableau ({nb_colonnes} colonnes)")
+                        df = pd.read_excel(uploaded_file)
+                
+                # Vérifier les colonnes en double
+                a_doublons, doublons = verifier_colonnes_en_double(df)
+                if a_doublons:
+                    st.warning(f"⚠️ Colonnes en double: {', '.join(doublons)}")
+                    if st.button("🔄 Renommer"):
+                        df = renommer_colonnes_doublons(df)
+                        show_popup("✅ Colonnes renommées", "success")
+                
+                # Sauvegarder
+                st.session_state.df_original = df.copy()
+                st.session_state.df_travail = df.copy()
+                st.session_state.nom_fichier = uploaded_file.name
+                sauvegarder_etat(df)
+                
+                st.dataframe(df.head(10), use_container_width=True)
+                
+                if st.button("✅ VALIDER", use_container_width=True, type="primary"):
+                    aller_a("accueil")
                     
-                    uploaded_file.seek(0)
-                    df = pd.read_csv(uploaded_file, sep=sep_char, encoding=enc_choice)
+            except Exception as e:
+                st.error(f"❌ Erreur: {e}")
+    
+    # ===== MODE FUSION MULTI-FICHIERS =====
+    else:
+        st.subheader("🔗 Fusionner plusieurs fichiers")
+        st.markdown("""
+        **Comment ça marche :**
+        - Importez plusieurs fichiers CSV ou Excel
+        - Tous les fichiers seront fusionnés en un seul
+        - Les fichiers avec 1 colonne deviennent des listes de numéros
+        - Les fichiers avec plusieurs colonnes gardent leurs en-têtes
+        """)
+        
+        uploaded_files = st.file_uploader(
+            "Choisir les fichiers à fusionner",
+            type=['csv', 'xlsx', 'xls'],
+            accept_multiple_files=True,
+            key="file_uploader_multi"
+        )
+        
+        if uploaded_files and len(uploaded_files) > 0:
+            st.info(f"📦 {len(uploaded_files)} fichier(s) sélectionné(s)")
             
-            else:
-                df = pd.read_excel(uploaded_file)
+            # Options de fusion
+            with st.expander("⚙️ Options de fusion"):
+                gestion_doublons = st.radio(
+                    "Gestion des doublons",
+                    ["Garder tous", "Supprimer les doublons exacts"],
+                    key="dedup_option"
+                )
+                
+                type_fusion = st.radio(
+                    "Type de fusion",
+                    ["Verticale (empiler les lignes)", "Horizontale (joindre les colonnes)"],
+                    horizontal=True,
+                    key="merge_type"
+                )
             
-            a_doublons, doublons = verifier_colonnes_en_double(df)
-            if a_doublons:
-                st.warning(f"⚠️ Colonnes en double: {', '.join(doublons)}")
-                if st.button("🔄 Renommer"):
-                    df = renommer_colonnes_doublons(df)
-                    show_popup("✅ Colonnes renommées automatiquement", "success", 2)
+            # Aperçu des fichiers
+            with st.expander("📋 Aperçu des fichiers"):
+                for i, file in enumerate(uploaded_files):
+                    st.markdown(f"**Fichier {i+1}: {file.name}**")
+                    try:
+                        if file.name.endswith('.csv'):
+                            preview_df = pd.read_csv(file, nrows=3)
+                        else:
+                            preview_df = pd.read_excel(file, nrows=3)
+                        st.dataframe(preview_df)
+                        st.caption(f"Colonnes: {', '.join(preview_df.columns)}")
+                    except:
+                        # Si erreur, essayer sans en-tête
+                        file.seek(0)
+                        if file.name.endswith('.csv'):
+                            preview_df = pd.read_csv(file, nrows=3, header=None)
+                        else:
+                            preview_df = pd.read_excel(file, nrows=3, header=None)
+                        st.dataframe(preview_df)
+                        st.caption("Format: liste de numéros")
+                    finally:
+                        file.seek(0)
             
-            st.session_state.df_original = df.copy()
-            st.session_state.df_travail = df.copy()
-            st.session_state.nom_fichier = uploaded_file.name
-            sauvegarder_etat(df)
-            
-            show_popup(f"✅ Fichier chargé: {len(df)} lignes, {len(df.columns)} colonnes", "success", 3)
-            st.dataframe(df.head(10), use_container_width=True)
-            
-            with st.expander("📋 Voir toutes les colonnes"):
-                st.write(df.columns.tolist())
-            
-            if st.button("✅ VALIDER", use_container_width=True, type="primary"):
-                aller_a("accueil")
-            
-        except Exception as e:
-            st.error(f"❌ Erreur: {e}")
-            st.info("💡 En mode manuel, essayez latin1 avec point-virgule")
+            # Bouton de fusion
+            if st.button("🚀 FUSIONNER LES FICHIERS", type="primary", use_container_width=True):
+                with st.spinner("Fusion en cours..."):
+                    all_dfs = []
+                    fusion_success = True
+                    progress_bar = st.progress(0)
+                    
+                    for i, file in enumerate(uploaded_files):
+                        try:
+                            # Lire chaque fichier intelligemment
+                            if file.name.endswith('.csv'):
+                                # Tester d'abord avec en-tête
+                                file.seek(0)
+                                try:
+                                    df_test = pd.read_csv(file, nrows=2)
+                                    if len(df_test.columns) > 1:
+                                        # Plusieurs colonnes → garder en-tête
+                                        file.seek(0)
+                                        df = pd.read_csv(file)
+                                    else:
+                                        # Une colonne → lire sans en-tête
+                                        file.seek(0)
+                                        df = pd.read_csv(file, header=None, names=[f'fichier_{i+1}'])
+                                except:
+                                    # Si erreur, lire sans en-tête
+                                    file.seek(0)
+                                    df = pd.read_csv(file, header=None, names=[f'fichier_{i+1}'])
+                            
+                            else:  # Excel
+                                file.seek(0)
+                                try:
+                                    df_test = pd.read_excel(file, nrows=2)
+                                    if len(df_test.columns) > 1:
+                                        file.seek(0)
+                                        df = pd.read_excel(file)
+                                    else:
+                                        file.seek(0)
+                                        df = pd.read_excel(file, header=None, names=[f'fichier_{i+1}'])
+                                except:
+                                    file.seek(0)
+                                    df = pd.read_excel(file, header=None, names=[f'fichier_{i+1}'])
+                            
+                            all_dfs.append(df)
+                            progress_bar.progress((i + 1) / len(uploaded_files))
+                            
+                        except Exception as e:
+                            st.error(f"❌ Erreur sur {file.name}: {e}")
+                            fusion_success = False
+                            break
+                    
+                    if fusion_success and all_dfs:
+                        # Fusion selon le type choisi
+                        if type_fusion == "Verticale (empiler les lignes)":
+                            df_fusion = pd.concat(all_dfs, ignore_index=True, sort=False)
+                        else:
+                            # Fusion horizontale (sur l'index)
+                            df_fusion = pd.concat(all_dfs, axis=1, ignore_index=False)
+                        # 👇 NOUVEAU : Tout rassembler dans une seule colonne 'numero'
+                        st.info("🔄 Reformatage des données en une seule colonne...")
+                        
+                        # Créer une liste vide pour tous les numéros
+                        tous_les_numeros = []
+                        
+                        # Parcourir toutes les colonnes du DataFrame fusionné
+                        for col in df_fusion.columns:
+                            # Ajouter les valeurs non vides de chaque colonne
+                            valeurs = df_fusion[col].dropna().astype(str).tolist()
+                            # Nettoyer chaque valeur
+                            valeurs = [str(int(float(v))) if '.0' in v else v for v in valeurs]
+                            tous_les_numeros.extend(valeurs)
+                        
+                        # Créer un nouveau DataFrame avec une seule colonne
+                        df_final = pd.DataFrame({'numero': tous_les_numeros})
+                        
+                        # Supprimer les doublons éventuels
+                        avant = len(df_final)
+                        df_final = df_final.drop_duplicates()
+                        apres = len(df_final)
+                        
+                        if avant > apres:
+                            st.info(f"🗑️ {avant - apres} doublons supprimés")
+                        
+                        st.success(f"✅ {len(df_final)} numéros uniques prêts pour la vérification")
+                        
+                        # Remplacer df_fusion par df_final
+                        df_fusion = df_final
+                        # Gestion des doublons
+                        avant = len(df_fusion)
+                        if gestion_doublons == "Supprimer les doublons exacts":
+                            df_fusion = df_fusion.drop_duplicates()
+                            apres = len(df_fusion)
+                            st.success(f"✅ {avant - apres} doublons supprimés")
+                        
+                        # Sauvegarder le résultat
+                        st.session_state.df_original = df_fusion.copy()
+                        st.session_state.df_travail = df_fusion.copy()
+                        st.session_state.nom_fichier = f"fusion_{len(uploaded_files)}_fichiers"
+                        sauvegarder_etat(df_fusion)
+                        
+                        st.success(f"✅ Fusion réussie! {len(df_fusion)} lignes, {len(df_fusion.columns)} colonnes")
+                        st.dataframe(df_fusion.head(10), use_container_width=True)
+                        
+                        if st.button("✅ UTILISER CE FICHIER", use_container_width=True, type="primary"):
+                            aller_a("accueil")
+    
+    st.markdown("---")
+    if st.button("🏠 Retour à l'accueil", use_container_width=True):
+        aller_a("accueil")
 
 # ----------------------------------------------------------------------------
 # PAGE TÉLÉPHONE
@@ -1641,3 +1819,247 @@ elif st.session_state.page == "export":
     
     else:
         st.warning("⚠️ Aucun fichier chargé.")
+
+# ----------------------------------------------------------------------------
+# PAGE VÉRIFICATION SDA (VERSION SIMPLIFIÉE)
+# ----------------------------------------------------------------------------
+elif st.session_state.page == "verification_sda":
+    st.title("🛡️ Vérification SDA")
+    st.markdown("Analyse sur 2 sources : **Google Libphonenumber** + **Numeroinconnu.fr**")
+    
+    # Bouton retour
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        if st.button("← Retour", use_container_width=True):
+            st.session_state.page = "accueil"
+            st.rerun()
+    
+    st.markdown("---")
+    
+    # Initialiser le checker
+    if 'reputation_checker' not in st.session_state:
+        st.session_state.reputation_checker = ReputationChecker()
+    
+    # Choix de la source
+    source = st.radio(
+        "Source des numéros",
+        ["📁 Fichier actuel", "📝 Coller une liste"],
+        horizontal=True
+    )
+    
+    numbers_to_check = []
+    
+    if source == "📁 Fichier actuel":
+        if st.session_state.df_travail is not None:
+            col_tel = st.selectbox(
+                "Choisir la colonne des numéros",
+                st.session_state.df_travail.columns
+            )
+            
+            if st.button("📂 Charger depuis le fichier"):
+                raw = st.session_state.df_travail[col_tel].dropna().astype(str)
+                cleaned = []
+                for n in raw:
+                    n_clean = re.sub(r'[\s\-\(\)]', '', str(n))
+                    if n_clean:
+                        cleaned.append(n_clean)
+                
+                numbers_to_check = list(dict.fromkeys(cleaned))
+                st.session_state.numbers_to_check = numbers_to_check
+                st.success(f"✅ {len(numbers_to_check)} numéros chargés")
+        else:
+            st.warning("⚠️ Veuillez d'abord charger un fichier")
+    
+    else:
+        text_input = st.text_area(
+            "Collez vos numéros (un par ligne):",
+            height=150,
+            placeholder="0612345678\n+33612345678\n0145367890"
+        )
+        
+        if st.button("📋 Charger la liste"):
+            numbers = []
+            for line in text_input.split('\n'):
+                n = line.strip()
+                if n:
+                    n_clean = re.sub(r'[\s\-\(\)]', '', n)
+                    if n_clean:
+                        numbers.append(n_clean)
+            
+            st.session_state.numbers_to_check = numbers
+            st.success(f"✅ {len(numbers)} numéros chargés")
+    
+    # Lancement de la vérification
+    if 'numbers_to_check' in st.session_state and st.session_state.numbers_to_check:
+        st.markdown("---")
+        st.subheader("⚙️ Lancer la vérification")
+        
+        delay = st.slider("⏱️ Délai entre vérifications (sec)", 1.0, 3.0, 1.5)
+        nb_total = len(st.session_state.numbers_to_check)
+        st.info(f"📊 {nb_total} numéros à vérifier")
+        
+        if st.button("🚀 LANCER LA VÉRIFICATION", type="primary", use_container_width=True):
+            
+            with st.spinner("Vérification en cours..."):
+                checker = st.session_state.reputation_checker
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                
+                results = []
+                
+                for i, num in enumerate(st.session_state.numbers_to_check):
+                    status_text.text(f"Analyse {i+1}/{nb_total} : {num}")
+                    result = checker.analyze_number(num)
+                    results.append(result)
+                    progress_bar.progress((i + 1) / nb_total)
+                    
+                    if i < nb_total - 1:
+                        time.sleep(delay)
+                
+                # Sauvegarde des résultats
+                st.session_state.verification_results = pd.DataFrame(results)
+                status_text.text("✅ Vérification terminée !")
+                show_popup(f"✅ {nb_total} numéros vérifiés", "success")
+    
+   # Affichage des résultats
+    if 'verification_results' in st.session_state:
+        df_results = st.session_state.verification_results
+        
+        st.markdown("---")
+        st.subheader("📊 Résultats")
+        
+        # Créer la colonne danger si elle n'existe pas
+        def get_danger_level(row):
+            ni = row.get('numeroinconnu', {})
+            if isinstance(ni, dict):
+                pct = ni.get('danger_percentage', 0)
+                if pct >= 70:
+                    return "🔴 Dangereux"
+                elif pct >= 50:  # Changé à 50% pour correspondre à ta demande
+                    return "🟠 Gênant"
+                elif pct > 0:
+                    return "🟢 Peu risqué"
+            return "⚪ Inconnu"
+        
+        df_results['danger'] = df_results.apply(get_danger_level, axis=1)
+        
+        # Ajouter une colonne avec le pourcentage
+        def get_danger_pct(row):
+            ni = row.get('numeroinconnu', {})
+            if isinstance(ni, dict):
+                return ni.get('danger_percentage', 0)
+            return 0
+        
+        df_results['danger_pct'] = df_results.apply(get_danger_pct, axis=1)
+        
+        # Métriques mises à jour
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("Total", len(df_results))
+        
+        # Compter les spammés (danger ≥ 50%)
+        spams = len(df_results[df_results['danger_pct'] >= 50])
+        
+        with col2:
+            ops = len(df_results[df_results['danger_pct'] < 50])
+            st.metric("🟢 Opérationnels", ops)
+        with col3:
+            st.metric("🟡 À vérifier", 0)  # Optionnel
+        with col4:
+            st.metric("🔴 Spammés", spams)
+        
+        # Tableau avec pourcentage à la place de risk_score
+        st.subheader("📋 Aperçu")
+        
+        # Nouvelles colonnes : on remplace risk_score par danger_pct
+        cols = ['number', 'status', 'danger', 'danger_pct', 'type', 'carrier', 'location']
+        df_display = df_results[cols].copy()
+        
+        # Renommer la colonne pour l'affichage
+        df_display = df_display.rename(columns={'danger_pct': 'danger %'})
+        
+        st.dataframe(df_display, use_container_width=True)
+        
+        # Détail Numeroinconnu (optionnel)
+        with st.expander("🔍 Détail des données Numeroinconnu.fr"):
+            for idx, row in df_results.iterrows():
+                st.markdown(f"**📞 {row['number']}**")
+                
+                ni = row.get('numeroinconnu', {})
+                if ni:
+                    pct = ni.get('danger_percentage', 0)
+                    
+                    # Barre de progression
+                    color = "red" if pct >= 70 else "orange" if pct >= 50 else "green"
+                    
+                    st.markdown(f"**Danger : {pct}%**")
+                    st.markdown(f"""
+                        <div style="width:100%; background:#ddd; border-radius:5px;">
+                            <div style="width:{pct}%; background:{color}; border-radius:5px; height:20px; text-align:center; color:white;">
+                                {pct}%
+                            </div>
+                        </div>
+                    """, unsafe_allow_html=True)
+                    
+                    # Statistiques
+                    stats = []
+                    if ni.get('visits'):
+                        stats.append(f"👁️ {ni['visits']} visites")
+                    if ni.get('last_visit'):
+                        stats.append(f"📅 {ni['last_visit']}")
+                    if ni.get('comments_count'):
+                        stats.append(f"💬 {ni['comments_count']} commentaires")
+                    
+                    if stats:
+                        st.markdown(" | ".join(stats))
+                    
+                    # Commentaires
+                    if ni.get('comments'):
+                        st.markdown("**Commentaires:**")
+                        for c in ni['comments']:
+                            st.markdown(f"- {c}")
+                else:
+                    st.markdown("*Pas de données Numeroinconnu*")
+                
+                st.markdown("---")
+    # ===== EXPORT SÉLECTIF =====
+    if 'verification_results' in st.session_state:
+        df_results = st.session_state.verification_results
+        
+        st.markdown("---")
+        st.subheader("📤 Export sélectif")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            option_export = st.radio(
+                "Que voulez-vous exporter ?",
+                ["📊 Tous les résultats", "🟢 Opérationnels uniquement", "🔴 Spammés uniquement"],
+                key="export_radio_final"
+            )
+        
+        # Créer df_export selon le choix
+        if 'danger_pct' in df_results.columns:
+            if option_export == "🟢 Opérationnels uniquement":
+                df_export = df_results[df_results['danger_pct'] < 50].copy()
+            elif option_export == "🔴 Spammés uniquement":
+                df_export = df_results[df_results['danger_pct'] >= 50].copy()
+            else:
+                df_export = df_results.copy()
+        else:
+            df_export = df_results.copy()
+        
+        with col2:
+            st.info(f"📦 {len(df_export)} numéros à exporter")
+        
+        # Bouton d'export
+        csv = df_export.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label=f"📥 Télécharger {len(df_export)} résultats",
+            data=csv,
+            file_name=f"verification_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_btn_final"
+        )    
+   

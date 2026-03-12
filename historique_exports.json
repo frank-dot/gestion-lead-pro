@@ -20,5 +20,104 @@
     "fichier_source": "VELOG net_20260309_122836.csv",
     "utilisateur": "admin",
     "taille_ko": 0
+  },
+  {
+    "id": 3,
+    "timestamp": "2026-03-12T09:39:28.441182",
+    "nom_fichier": "NAF_6820B-8211-8299_20260312_093928.csv",
+    "format": "CSV",
+    "lignes": 7117,
+    "colonnes": 13,
+    "fichier_source": "BTB partie 2- feuille2.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 4,
+    "timestamp": "2026-03-12T09:48:56.151171",
+    "nom_fichier": "contacts_20260312_094856.csv",
+    "format": "CSV",
+    "lignes": 7291,
+    "colonnes": 13,
+    "fichier_source": "BTB partie 2- feuille2.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 5,
+    "timestamp": "2026-03-12T09:51:39.031762",
+    "nom_fichier": "NAF_8891A-8710ABC-8730A-8610Z_20260312_095139.csv",
+    "format": "CSV",
+    "lignes": 3861,
+    "colonnes": 13,
+    "fichier_source": "contacts_20260312_094856.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 6,
+    "timestamp": "2026-03-12T10:16:20.179800",
+    "nom_fichier": "contacts_20260312_101619.csv",
+    "format": "CSV",
+    "lignes": 27784,
+    "colonnes": 13,
+    "fichier_source": "BTB partie 2- feuille2.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 7,
+    "timestamp": "2026-03-12T10:18:50.398129",
+    "nom_fichier": "BDC_NAF_47.73Z 55.10Z 87.10A 68.31Z 68.32A 55.30Z_20260312_101850.csv",
+    "format": "CSV",
+    "lignes": 15521,
+    "colonnes": 13,
+    "fichier_source": "contacts_20260312_101619.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 8,
+    "timestamp": "2026-03-12T10:45:15.322074",
+    "nom_fichier": "Celsius_Boulangerie_Patisserie_10-77-51-52-29-IDF_20260312_104515.csv",
+    "format": "CSV",
+    "lignes": 2616,
+    "colonnes": 8,
+    "fichier_source": "BOULANGERIE-PATISSERIE_TLF.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 9,
+    "timestamp": "2026-03-12T16:31:21.846739",
+    "nom_fichier": "contacts_20260312_163121.csv",
+    "format": "CSV",
+    "lignes": 798,
+    "colonnes": 8,
+    "fichier_source": "iso.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 10,
+    "timestamp": "2026-03-12T16:31:35.370820",
+    "nom_fichier": "contacts_20260312_163135.csv",
+    "format": "CSV",
+    "lignes": 798,
+    "colonnes": 8,
+    "fichier_source": "iso.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
+  },
+  {
+    "id": 11,
+    "timestamp": "2026-03-12T16:38:40.923202",
+    "nom_fichier": "contacts_20260312_163840.csv",
+    "format": "CSV",
+    "lignes": 798,
+    "colonnes": 8,
+    "fichier_source": "iso.csv",
+    "utilisateur": "admin",
+    "taille_ko": 0
   }
 ]
