@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import json
 import os
+import tempfile
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import time
@@ -108,6 +109,37 @@ CORRECTIONS_FILE = "corrections_nogali.json"
 PREUVES_DIR = "preuves"
 
 os.makedirs(PREUVES_DIR, exist_ok=True)
+
+# Override optionnel via Streamlit secrets (hébergement cloud)
+try:
+    if "SHEET_URL" in st.secrets:
+        SHEET_URL = st.secrets["SHEET_URL"]
+except Exception:
+    pass
+
+
+def _get_credentials_file_path():
+    """
+    Retourne le chemin du fichier de credentials à utiliser.
+    Priorité:
+    1) credentials.json local (mode dev local)
+    2) st.secrets['gcp_service_account'] (mode Streamlit Cloud)
+    """
+    if os.path.exists(CREDENTIALS_FILE):
+        return CREDENTIALS_FILE
+
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds = dict(st.secrets["gcp_service_account"])
+            tmp_dir = tempfile.gettempdir()
+            tmp_path = os.path.join(tmp_dir, "nogali_gcp_service_account.json")
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(creds, f, ensure_ascii=False)
+            return tmp_path
+    except Exception:
+        pass
+
+    return None
 
 # ==================== GESTION DES CORRECTIONS MANUELLES ====================
 def charger_corrections():
@@ -218,12 +250,13 @@ def clean_montant_charge(val, prestataire):
 # ==================== CHARGEMENT ====================
 @st.cache_data(ttl=86400)
 def charger_depuis_api():
-    if not os.path.exists(CREDENTIALS_FILE):
+    creds_path = _get_credentials_file_path()
+    if not creds_path:
         return pd.DataFrame(), pd.DataFrame()
     
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name(CREDENTIALS_FILE, scope)
+        creds = ServiceAccountCredentials.from_json_keyfile_name(creds_path, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open_by_url(SHEET_URL)
         
