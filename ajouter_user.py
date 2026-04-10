@@ -6,6 +6,7 @@ from collections import Counter
 import io
 import json
 import os
+import chardet
 
 # ============================================================================
 # CONFIGURATION INITIALE
@@ -234,6 +235,26 @@ def detecter_encodage_et_separateur(fichier):
             continue
     
     return None, None
+
+
+def detecter_encodage_robuste(fichier):
+    """Détecte l'encodage d'un fichier avec chardet (plus fiable)"""
+    # Lire les premiers octets pour la détection
+    raw_data = fichier.read(10000)  # 10KB suffisent
+    fichier.seek(0)
+    
+    result = chardet.detect(raw_data)
+    encodage = result['encoding']
+    confiance = result['confidence']
+    
+    print(f"🔍 Chardet détecte: {encodage} (confiance: {confiance:.2%})")
+    
+    # Si la confiance est faible, on force latin1
+    if confiance < 0.5:
+        print("⚠️ Confiance faible, utilisation de latin1 par défaut")
+        return 'latin1'
+    
+    return encodage
 
 # ============================================================================
 # COMPOSANTS D'INTERFACE RÉUTILISABLES

@@ -1,0 +1,23 @@
+{
+  "admin": {
+    "nom": "Administrateur",
+    "mot_de_passe": "<sha256_du_mot_de_passe>",
+    "role": "admin",
+    "permissions": {
+      "access_admin_leads_pro": true,
+      "access_nogali_finance": true,
+      "access_fin_dashboard": true,
+      "access_fin_mensuel": true,
+      "access_fin_suivi": true,
+      "access_module_import": true,
+      "access_module_telephone": true,
+      "access_module_doublons": true,
+      "access_module_filtre": true,
+      "access_module_export": true,
+      "access_module_verif_sda": true,
+      "access_module_alertes": true,
+      "access_module_base_sda": true
+    },
+    "date_creation": "2026-01-01T00:00:00"
+  }
+}

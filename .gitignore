@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local runtime files
+*.db
+*.sqlite
+*.sqlite3
+*.log
+historique_exports.json
+sda_database.db
+charges.csv
+revenus.csv
+utilisateurs.json
+
+# Streamlit / local app artifacts
+.streamlit/
+
+# Sensitive files
+credentials.json
+**/credentials.json
+*.pem
+*.key
+*.p12
+
+# Finance local data (generated/operational)
+integrations/nogali_finance/status_nogali.json
+integrations/nogali_finance/corrections_nogali.json
+integrations/nogali_finance/last_update.json
+integrations/nogali_finance/preuves/
+integrations/nogali_finance/charges.csv
+integrations/nogali_finance/revenus.csv
+integrations/nogali_finance/rapport_nogali.xlsx
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

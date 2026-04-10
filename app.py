@@ -10,6 +10,48 @@ import os
 import hashlib
 import time
 import random
+import sqlite3
+import chardet
+from auth_shared import (
+    PERMISSION_LEADS,
+    PERMISSION_FINANCE,
+    PERMISSION_IMPORT,
+    PERMISSION_TELEPHONE,
+    PERMISSION_DOUBLONS,
+    PERMISSION_FILTRE,
+    PERMISSION_EXPORT,
+    PERMISSION_VERIF_SDA,
+    PERMISSION_ALERTES,
+    PERMISSION_BASE_SDA,
+    PERMISSION_FIN_DASHBOARD,
+    PERMISSION_FIN_MENSUEL,
+    PERMISSION_FIN_SUIVI,
+    default_permissions,
+    has_permission,
+    hash_password as shared_hash_password,
+    charger_utilisateurs as shared_charger_utilisateurs,
+    sauvegarder_utilisateurs as shared_sauvegarder_utilisateurs,
+    creer_utilisateur_defaut as shared_creer_utilisateur_defaut,
+    authentifier as shared_authentifier,
+)
+
+# Initialisation de la base SDA
+from sda_database import init_database
+init_database()
+from sda_operations import SDAManager
+
+# ============================================================================
+# CHARGEMENT DE LA CONFIGURATION AU DÉMARRAGE
+# ============================================================================
+from email_alerter import EmailAlerter
+from scheduler import VerificationScheduler
+# Initialiser l'alerter une seule fois au démarrage
+if 'alerter' not in st.session_state:
+    st.session_state.alerter = EmailAlerter()
+    st.session_state.config_chargee = st.session_state.alerter.config is not None
+# AJOUT CES LIGNES POUR INITIALISER LE SCHEDULER
+if 'scheduler' not in st.session_state:
+    st.session_state.scheduler = VerificationScheduler()    
 # ============================================================================
 # GESTION DES NOTIFICATIONS (version simple et fiable)
 # ============================================================================
@@ -79,45 +121,23 @@ FICHIER_UTILISATEURS = "utilisateurs.json"
 
 def hash_password(mot_de_passe):
     """Hash un mot de passe avec SHA256"""
-    return hashlib.sha256(mot_de_passe.encode()).hexdigest()
+    return shared_hash_password(mot_de_passe)
 
 def charger_utilisateurs():
     """Charge les utilisateurs depuis le fichier JSON"""
-    if os.path.exists(FICHIER_UTILISATEURS):
-        try:
-            with open(FICHIER_UTILISATEURS, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except:
-            return {}
-    return {}
+    return shared_charger_utilisateurs()
 
 def sauvegarder_utilisateurs(utilisateurs):
     """Sauvegarde les utilisateurs dans le fichier JSON"""
-    with open(FICHIER_UTILISATEURS, 'w', encoding='utf-8') as f:
-        json.dump(utilisateurs, f, indent=2, ensure_ascii=False)
+    shared_sauvegarder_utilisateurs(utilisateurs)
 
 def creer_utilisateur_defaut():
     """Crée un utilisateur admin par défaut si aucun n'existe"""
-    utilisateurs = charger_utilisateurs()
-    if not utilisateurs:
-        utilisateurs["admin"] = {
-            "nom": "Administrateur",
-            "mot_de_passe": hash_password("admin123"),
-            "role": "admin",
-            "date_creation": datetime.now().isoformat()
-        }
-        sauvegarder_utilisateurs(utilisateurs)
-    return utilisateurs
+    return shared_creer_utilisateur_defaut()
 
 def authentifier(identifiant, mot_de_passe):
     """Vérifie les identifiants de connexion"""
-    utilisateurs = charger_utilisateurs()
-    
-    if identifiant in utilisateurs:
-        if utilisateurs[identifiant]["mot_de_passe"] == hash_password(mot_de_passe):
-            return True, utilisateurs[identifiant]
-    
-    return False, None
+    return shared_authentifier(identifiant, mot_de_passe)
 
 # ============================================================================
 # INITIALISATION DE LA SESSION
@@ -130,6 +150,7 @@ def init_session_state():
         'nom': '',
         'identifiant': '',
         'role': 'user',
+        'permissions': {},
         'df_original': None,
         'df_travail': None,
         'nom_fichier': '',
@@ -232,7 +253,21 @@ def se_connecter(identifiant, user_info):
     st.session_state.nom = user_info.get("nom", identifiant)
     st.session_state.identifiant = identifiant
     st.session_state.role = user_info.get("role", "user")
-    st.session_state.page = "accueil"
+    st.session_state.permissions = user_info.get(
+        "permissions",
+        default_permissions(st.session_state.role)
+    )
+    can_leads = has_permission(user_info, PERMISSION_LEADS)
+    can_finance = has_permission(user_info, PERMISSION_FINANCE)
+
+    if can_leads and can_finance:
+        st.session_state.page = "hub"
+    elif can_leads:
+        st.session_state.page = "accueil"
+    elif can_finance:
+        st.session_state.page = "redirect_finance"
+    else:
+        st.session_state.page = "no_access"
     show_popup(f"👋 Bonjour {st.session_state.nom} !", "success", 2)
 
 def se_deconnecter():
@@ -242,6 +277,7 @@ def se_deconnecter():
     st.session_state.nom = ''
     st.session_state.identifiant = ''
     st.session_state.role = 'user'
+    st.session_state.permissions = {}
     st.session_state.df_original = None
     st.session_state.df_travail = None
     st.session_state.nom_fichier = ''
@@ -287,6 +323,25 @@ def aller_a(page):
     """Navigation entre les pages"""
     st.session_state.page = page
     st.rerun()
+
+
+def appliquer_visibilite_navigation(can_leads: bool, can_finance: bool):
+    """
+    Masque les entrées de navigation Streamlit selon les privilèges.
+    Hypothèse: 2 pages visibles dans la nav (app, Nogali Finance).
+    """
+    st.markdown(
+        "<style>[data-testid='stSidebarNav']{display:none !important;}</style>",
+        unsafe_allow_html=True,
+    )
+
+
+def utilisateur_a_droit(permission_key: str) -> bool:
+    user_ctx = {
+        "role": st.session_state.get("role", "user"),
+        "permissions": st.session_state.get("permissions", {}),
+    }
+    return has_permission(user_ctx, permission_key)
 
 # ============================================================================
 # FONCTIONS DE TRAITEMENT DES DONNÉES
@@ -383,6 +438,15 @@ def detecter_encodage_et_separateur(fichier):
 def afficher_barre_laterale():
     """Affiche la barre latérale avec les infos utilisateur"""
     with st.sidebar:
+        st.markdown("### Applications")
+        if utilisateur_a_droit(PERMISSION_LEADS):
+            st.page_link("app.py", label="Gestion Leads et SDA", icon="📋")
+        if utilisateur_a_droit(PERMISSION_FINANCE):
+            st.page_link("pages/2_Nogali_Finance.py", label="Nogali Finance", icon="💰")
+        if st.session_state.get("role") == "super_admin":
+            st.page_link("pages/3_Gestion_Utilisateurs.py", label="Gestion Utilisateurs", icon="👥")
+        st.markdown("---")
+
         st.image("https://img.icons8.com/fluency/96/user-male-circle.png", width=80)
         st.markdown(f"### 👤 {st.session_state.get('nom', 'Utilisateur')}")
         if st.session_state.get('identifiant'):
@@ -453,25 +517,63 @@ def afficher_barre_laterale():
             st.rerun()
 
 def afficher_carte_fonctionnalite(icone, titre, couleur, page, disabled=False):
-    """Affiche une carte de fonctionnalité cliquable"""
+    """Affiche une carte de fonctionnalité cliquable (sans bouton visible)"""
+    
+    # Créer une clé unique pour chaque carte
+    import hashlib
+    import time
+    unique_id = hashlib.md5(f"{titre}_{page}_{time.time()}".encode()).hexdigest()[:8]
+    btn_key = f"btn_{page}_{unique_id}"
+    
+    # Style de la carte
     style = f"""
         background: {couleur};
-        padding: 1.5rem;
-        border-radius: 10px;
+        padding: 1rem;
+        border-radius: 8px;
         text-align: center;
         color: white;
-        margin-bottom: 1rem;
+        margin-bottom: 0.8rem;
         opacity: {0.5 if disabled else 1};
-        cursor: pointer;
-        transition: transform 0.3s;
+        font-size: 0.9rem;
+        cursor: {'pointer' if not disabled else 'default'};
+        transition: all 0.2s ease;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     """
     
-    st.markdown(f"""
-        <div style="{style}">
-            <div style="font-size: 3rem;">{icone}</div>
-            <div style="font-size: 1.3rem; font-weight: bold;">{titre}</div>
-        </div>
-    """, unsafe_allow_html=True)
+    # Si la carte est cliquable, on crée un bouton invisible
+    if not disabled and page:
+        # Créer un bouton Streamlit avec une clé unique
+        bouton_clique = st.button(f"📌 {titre}", key=btn_key, use_container_width=True)
+        
+        # Masquer le bouton avec du CSS
+        st.markdown(f"""
+            <style>
+                div[data-testid="stButton"]:has(button[key="{btn_key}"]) {{
+                    display: none;
+                }}
+            </style>
+        """, unsafe_allow_html=True)
+        
+        # Si le bouton est cliqué, navigation
+        if bouton_clique:
+            aller_a(page)
+        
+        # Carte cliquable qui déclenche le bouton
+        st.markdown(f"""
+            <div style="{style}" onclick="document.querySelector('button[key=\\'{btn_key}\\']').click();">
+                <div style="font-size: 2rem;">{icone}</div>
+                <div style="font-size: 1rem; font-weight: bold;">{titre}</div>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    else:
+        # Version non cliquable (simple affichage)
+        st.markdown(f"""
+            <div style="{style}">
+                <div style="font-size: 2rem;">{icone}</div>
+                <div style="font-size: 1rem; font-weight: bold;">{titre}</div>
+            </div>
+        """, unsafe_allow_html=True)
     
     if not disabled:
         if st.button(f"📌 {titre}", key=f"btn_{page}", use_container_width=True):
@@ -496,6 +598,28 @@ def afficher_tableau_de_bord():
             dernier = st.session_state.tableau_de_bord['dernier_export']
             st.metric("Dernier export", dernier['format'])
 
+def extraire_code_postal(adresse):
+    """Extrait un code postal français (5 chiffres) d'une adresse"""
+    if pd.isna(adresse):
+        return None
+    
+    # Convertir en string et nettoyer
+    adresse_str = str(adresse)
+    
+    # Enlever le .0 si présent
+    if '.0' in adresse_str:
+        adresse_str = adresse_str.replace('.0', '')
+    
+    # Chercher un groupe de 4 ou 5 chiffres
+    match = re.search(r'\b(\d{4,5})\b', adresse_str)
+    if match:
+        code = match.group(1)
+        # Si le code a 4 chiffres, ajouter un zéro devant
+        if len(code) == 4:
+            return f"0{code}"
+        return code
+    
+    return None
 def afficher_gestion_utilisateurs():
     """Affiche l'interface de gestion des utilisateurs"""
     st.subheader("👥 Gestion des utilisateurs")
@@ -506,22 +630,144 @@ def afficher_gestion_utilisateurs():
     st.write("### Utilisateurs existants")
     
     for identifiant, infos in utilisateurs.items():
-        col1, col2, col3, col4 = st.columns([2, 2, 1, 1])
+        permissions = infos.get("permissions", default_permissions(infos.get("role", "user")))
+        col1, col2, col3, col4, col5, col6 = st.columns([2, 2, 1, 1, 1, 1])
         with col1:
             st.write(f"**{infos['nom']}**")
         with col2:
             st.write(f"@{identifiant}")
         with col3:
-            role = "🛡️ Admin" if infos['role'] == 'admin' else "👤 User"
+            if infos['role'] == 'super_admin':
+                role = "👑 Super Admin"
+            elif infos['role'] == 'admin':
+                role = "🛡️ Admin"
+            else:
+                role = "👤 User"
             st.write(role)
         with col4:
-            if identifiant != "admin":  # Ne pas pouvoir supprimer admin
+            st.write("✅ Leads" if permissions.get("access_admin_leads_pro", False) else "❌ Leads")
+        with col5:
+            st.write("✅ Finance" if permissions.get("access_nogali_finance", False) else "❌ Finance")
+        with col6:
+            if identifiant not in ["admin", "superadmin"]:  # Comptes systeme protégés
                 if st.button("🗑️", key=f"del_{identifiant}"):
                     del utilisateurs[identifiant]
                     sauvegarder_utilisateurs(utilisateurs)
                     show_popup(f"✅ Utilisateur {identifiant} supprimé", "success", 2)
                     st.rerun()
         st.markdown("---")
+
+    with st.expander("🔐 Modifier les droits d'accès", expanded=False):
+        if utilisateurs:
+            selected_user = st.selectbox("Utilisateur", list(utilisateurs.keys()), key="perm_user_select")
+            user_info = utilisateurs[selected_user]
+            current_role = user_info.get("role", "user")
+            current_permissions = user_info.get("permissions", default_permissions(current_role))
+
+            st.markdown("**Rôle utilisateur**")
+            new_role_value = st.selectbox(
+                "Changer le rôle",
+                ["user", "admin", "super_admin"],
+                index=["user", "admin", "super_admin"].index(current_role) if current_role in ["user", "admin", "super_admin"] else 0,
+                key=f"role_select_{selected_user}",
+            )
+            if st.button("💾 Enregistrer le rôle", key="save_role_btn", use_container_width=True):
+                if selected_user == "superadmin" and new_role_value != "super_admin":
+                    show_popup("Le compte superadmin doit rester super_admin", "error", 3)
+                elif selected_user == "admin" and new_role_value == "user":
+                    show_popup("Le compte admin ne peut pas être rétrogradé en user", "error", 3)
+                else:
+                    utilisateurs[selected_user]["role"] = new_role_value
+                    # Harmonise les permissions manquantes selon le nouveau rôle.
+                    merged = default_permissions(new_role_value)
+                    existing = utilisateurs[selected_user].get("permissions", {})
+                    if isinstance(existing, dict):
+                        merged.update(existing)
+                    utilisateurs[selected_user]["permissions"] = merged
+                    sauvegarder_utilisateurs(utilisateurs)
+                    show_popup(f"✅ Rôle mis à jour pour @{selected_user}", "success", 2)
+                    st.rerun()
+            st.markdown("---")
+
+            st.markdown("**Modifier le mot de passe**")
+            pwd1 = st.text_input("Nouveau mot de passe", type="password", key=f"pwd1_{selected_user}")
+            pwd2 = st.text_input("Confirmer mot de passe", type="password", key=f"pwd2_{selected_user}")
+            if st.button("🔑 Mettre à jour le mot de passe", key="save_password_btn", use_container_width=True):
+                if not pwd1 or not pwd2:
+                    show_popup("Veuillez remplir les deux champs de mot de passe", "warning", 3)
+                elif pwd1 != pwd2:
+                    show_popup("Les mots de passe ne correspondent pas", "error", 3)
+                elif len(pwd1) < 6:
+                    show_popup("Le mot de passe doit contenir au moins 6 caractères", "warning", 3)
+                else:
+                    utilisateurs[selected_user]["mot_de_passe"] = hash_password(pwd1)
+                    sauvegarder_utilisateurs(utilisateurs)
+                    show_popup(f"✅ Mot de passe mis à jour pour @{selected_user}", "success", 2)
+                    st.rerun()
+            st.markdown("---")
+
+            can_access_leads = st.checkbox(
+                "Accès application Admin Leads Pro",
+                value=bool(current_permissions.get("access_admin_leads_pro", current_role in ["admin", "super_admin"])),
+                key=f"perm_leads_{selected_user}"
+            )
+            can_access_finance = st.checkbox(
+                "Accès application Nogali Finance",
+                value=bool(current_permissions.get("access_nogali_finance", current_role in ["admin", "super_admin"])),
+                key=f"perm_finance_{selected_user}"
+            )
+            st.markdown("**Droits modules internes (Nogali Finance)**")
+            f1, f2, f3 = st.columns(3)
+            with f1:
+                perm_fin_dashboard = st.checkbox(
+                    "Finance - Tableau de bord",
+                    value=bool(current_permissions.get("access_fin_dashboard", True)),
+                    key=f"perm_f_dash_{selected_user}",
+                )
+            with f2:
+                perm_fin_mensuel = st.checkbox(
+                    "Finance - Vue mensuelle",
+                    value=bool(current_permissions.get("access_fin_mensuel", True)),
+                    key=f"perm_f_mens_{selected_user}",
+                )
+            with f3:
+                perm_fin_suivi = st.checkbox(
+                    "Finance - Suivi paiements",
+                    value=bool(current_permissions.get("access_fin_suivi", True)),
+                    key=f"perm_f_suiv_{selected_user}",
+                )
+            st.markdown("**Droits modules internes (Gestion Leads et SDA)**")
+            c1, c2 = st.columns(2)
+            with c1:
+                perm_import = st.checkbox("Module IMPORT", value=bool(current_permissions.get("access_module_import", False)), key=f"perm_import_{selected_user}")
+                perm_telephone = st.checkbox("Module TÉLÉPHONE", value=bool(current_permissions.get("access_module_telephone", False)), key=f"perm_tel_{selected_user}")
+                perm_doublons = st.checkbox("Module DOUBLONS", value=bool(current_permissions.get("access_module_doublons", False)), key=f"perm_dbl_{selected_user}")
+                perm_filtre = st.checkbox("Module FILTRE", value=bool(current_permissions.get("access_module_filtre", False)), key=f"perm_fil_{selected_user}")
+            with c2:
+                perm_export = st.checkbox("Module EXPORT", value=bool(current_permissions.get("access_module_export", False)), key=f"perm_exp_{selected_user}")
+                perm_verif_sda = st.checkbox("Module VÉRIF SDA", value=bool(current_permissions.get("access_module_verif_sda", False)), key=f"perm_vsda_{selected_user}")
+                perm_alertes = st.checkbox("Module ALERTES", value=bool(current_permissions.get("access_module_alertes", False)), key=f"perm_alt_{selected_user}")
+                perm_base_sda = st.checkbox("Module BASE SDA", value=bool(current_permissions.get("access_module_base_sda", False)), key=f"perm_bsda_{selected_user}")
+
+            if st.button("💾 Enregistrer les droits", key="save_permissions_btn", use_container_width=True):
+                utilisateurs[selected_user]["permissions"] = {
+                    "access_admin_leads_pro": can_access_leads,
+                    "access_nogali_finance": can_access_finance,
+                    "access_fin_dashboard": perm_fin_dashboard,
+                    "access_fin_mensuel": perm_fin_mensuel,
+                    "access_fin_suivi": perm_fin_suivi,
+                    "access_module_import": perm_import,
+                    "access_module_telephone": perm_telephone,
+                    "access_module_doublons": perm_doublons,
+                    "access_module_filtre": perm_filtre,
+                    "access_module_export": perm_export,
+                    "access_module_verif_sda": perm_verif_sda,
+                    "access_module_alertes": perm_alertes,
+                    "access_module_base_sda": perm_base_sda,
+                }
+                sauvegarder_utilisateurs(utilisateurs)
+                show_popup(f"✅ Droits mis à jour pour @{selected_user}", "success", 2)
+                st.rerun()
     
     # Formulaire d'ajout
     with st.expander("➕ Ajouter un nouvel utilisateur"):
@@ -530,7 +776,35 @@ def afficher_gestion_utilisateurs():
             new_nom = st.text_input("Nom complet")
             new_mdp = st.text_input("Mot de passe", type="password")
             new_mdp2 = st.text_input("Confirmer mot de passe", type="password")
-            new_role = st.selectbox("Rôle", ["user", "admin"])
+            new_role = st.selectbox("Rôle", ["user", "admin", "super_admin"])
+            access_leads_new = st.checkbox(
+                "Accès Admin Leads Pro",
+                value=True
+            )
+            access_finance_new = st.checkbox(
+                "Accès Nogali Finance",
+                value=(new_role in ["admin", "super_admin"])
+            )
+            st.markdown("**Modules Finance activés**")
+            fnew1, fnew2, fnew3 = st.columns(3)
+            with fnew1:
+                access_fin_dashboard_new = st.checkbox("Tableau de bord Finance", value=True)
+            with fnew2:
+                access_fin_mensuel_new = st.checkbox("Vue mensuelle Finance", value=True)
+            with fnew3:
+                access_fin_suivi_new = st.checkbox("Suivi paiements Finance", value=True)
+            st.markdown("**Modules internes activés**")
+            mcol1, mcol2 = st.columns(2)
+            with mcol1:
+                access_import_new = st.checkbox("IMPORT", value=True)
+                access_telephone_new = st.checkbox("TÉLÉPHONE", value=True)
+                access_doublons_new = st.checkbox("DOUBLONS", value=True)
+                access_filtre_new = st.checkbox("FILTRE", value=True)
+            with mcol2:
+                access_export_new = st.checkbox("EXPORT", value=True)
+                access_verif_sda_new = st.checkbox("VÉRIF SDA", value=(new_role in ["admin", "super_admin"]))
+                access_alertes_new = st.checkbox("ALERTES", value=(new_role in ["admin", "super_admin"]))
+                access_base_sda_new = st.checkbox("BASE SDA", value=(new_role in ["admin", "super_admin"]))
             
             if st.form_submit_button("Créer l'utilisateur"):
                 if not new_id or not new_nom or not new_mdp:
@@ -548,6 +822,21 @@ def afficher_gestion_utilisateurs():
                             "nom": new_nom,
                             "mot_de_passe": hash_password(new_mdp),
                             "role": new_role,
+                            "permissions": {
+                                "access_admin_leads_pro": access_leads_new,
+                                "access_nogali_finance": access_finance_new,
+                                "access_fin_dashboard": access_fin_dashboard_new,
+                                "access_fin_mensuel": access_fin_mensuel_new,
+                                "access_fin_suivi": access_fin_suivi_new,
+                                "access_module_import": access_import_new,
+                                "access_module_telephone": access_telephone_new,
+                                "access_module_doublons": access_doublons_new,
+                                "access_module_filtre": access_filtre_new,
+                                "access_module_export": access_export_new,
+                                "access_module_verif_sda": access_verif_sda_new,
+                                "access_module_alertes": access_alertes_new,
+                                "access_module_base_sda": access_base_sda_new,
+                            },
                             "date_creation": datetime.now().isoformat()
                         }
                         sauvegarder_utilisateurs(utilisateurs)
@@ -584,6 +873,51 @@ def afficher_gestion_utilisateurs():
 # PAGES DE L'APPLICATION
 # ============================================================================
 
+# Force toujours le retour à la page de connexion si la session est fermée.
+if not st.session_state.get("authentifie", False) and st.session_state.get("page") != "login":
+    st.session_state.page = "login"
+    st.rerun()
+
+if st.session_state.get("authentifie"):
+    user_ctx = {
+        "role": st.session_state.get("role", "user"),
+        "permissions": st.session_state.get("permissions", {}),
+    }
+    can_leads = has_permission(user_ctx, PERMISSION_LEADS)
+    can_finance = has_permission(user_ctx, PERMISSION_FINANCE)
+    appliquer_visibilite_navigation(can_leads, can_finance)
+
+    if st.session_state.page == "redirect_finance":
+        if can_finance:
+            st.switch_page("pages/2_Nogali_Finance.py")
+        else:
+            st.session_state.page = "no_access"
+            st.rerun()
+
+    if st.session_state.page not in ["login", "no_access", "hub"] and not can_leads:
+        if can_finance:
+            st.switch_page("pages/2_Nogali_Finance.py")
+        else:
+            st.session_state.page = "no_access"
+            st.rerun()
+
+    module_permissions = {
+        "import": PERMISSION_IMPORT,
+        "telephone": PERMISSION_TELEPHONE,
+        "doublons": PERMISSION_DOUBLONS,
+        "filtre": PERMISSION_FILTRE,
+        "export": PERMISSION_EXPORT,
+        "verification_sda": PERMISSION_VERIF_SDA,
+        "config_alertes": PERMISSION_ALERTES,
+        "gestion_sda": PERMISSION_BASE_SDA,
+    }
+    current_page = st.session_state.get("page")
+    required_permission = module_permissions.get(current_page)
+    if required_permission and not utilisateur_a_droit(required_permission):
+        show_popup("⛔ Accès refusé à ce module", "error", 3)
+        st.session_state.page = "accueil"
+        st.rerun()
+
 # ----------------------------------------------------------------------------
 # PAGE DE CONNEXION MODERNE
 # ----------------------------------------------------------------------------
@@ -596,6 +930,11 @@ if st.session_state.page == "login":
         .stApp {
             background: linear-gradient(145deg, #4158D0 0%, #C850C0 46%, #FFCC70 100%);
             font-family: 'Poppins', sans-serif;
+        }
+        [data-testid="stSidebar"],
+        [data-testid="stSidebarNav"],
+        [data-testid="collapsedControl"] {
+            display: none !important;
         }
         
         .login-card {
@@ -761,7 +1100,7 @@ if st.session_state.page == "login":
             st.markdown("""
                 <div class="login-card">
                     <div class="login-header">
-                        <h1>🔐 Gestion Leads Pro</h1>
+                        <h1>🔐 Nogali Solutions Services Pro</h1>
                         <p>Connectez-vous pour accéder à votre espace</p>
                     </div>
             """, unsafe_allow_html=True)
@@ -818,68 +1157,254 @@ if st.session_state.page == "login":
             st.markdown("</div>", unsafe_allow_html=True)
 
 # ----------------------------------------------------------------------------
-# PAGE D'ACCUEIL
+# HUB APPLICATIF (CHOIX PAR PRIVILEGES)
+# ----------------------------------------------------------------------------
+elif st.session_state.page == "hub":
+    afficher_barre_laterale()
+    is_super_admin = st.session_state.get("role") == "super_admin"
+    hub_class = "super-admin-hub" if is_super_admin else ""
+    st.markdown(
+        """
+        <style>
+        .app-cadran {
+            border-radius: 18px;
+            padding: 1.2rem;
+            border: 1px solid color-mix(in srgb, var(--text-color, #111) 22%, transparent 78%);
+            background: color-mix(in srgb, var(--secondary-background-color, #f5f6fa) 90%, #5c7cfa 10%);
+            box-shadow: 0 8px 24px color-mix(in srgb, var(--text-color, #111) 14%, transparent 86%);
+            text-align: center;
+            min-height: 170px;
+            color: var(--text-color, #111);
+        }
+        .super-admin-hub .app-cadran {
+            border: 1px solid color-mix(in srgb, var(--text-color, #111) 35%, #f1c40f 65%);
+            background: linear-gradient(
+                145deg,
+                color-mix(in srgb, var(--secondary-background-color, #f6f7fb) 86%, #f1c40f 14%),
+                color-mix(in srgb, var(--secondary-background-color, #f6f7fb) 82%, #7b61ff 18%)
+            );
+            box-shadow: 0 10px 28px color-mix(in srgb, var(--text-color, #111) 16%, transparent 84%);
+            color: var(--text-color, #111);
+        }
+        .app-cadran .icon {
+            font-size: 2.2rem;
+            margin-bottom: 0.35rem;
+        }
+        .app-cadran .title {
+            font-size: 1.15rem;
+            font-weight: 700;
+            margin-bottom: 0.35rem;
+        }
+        .app-cadran .desc {
+            opacity: 0.85;
+            font-size: 0.92rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.markdown(f"## 🚀 Choix de l'application, {st.session_state.nom}")
+    if is_super_admin:
+        st.info("👑 Mode Super Admin actif")
+    st.caption("L'accès est piloté par vos privilèges.")
+
+    st.markdown(f"<div class='{hub_class}'>", unsafe_allow_html=True)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(
+            """
+            <div class="app-cadran">
+                <div class="icon">📋</div>
+                <div class="title">Admin Leads Pro</div>
+                <div class="desc">Gestion, traitement et export des contacts.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Ouvrir Admin Leads Pro", use_container_width=True, key="hub_open_leads"):
+            st.session_state.page = "accueil"
+            st.rerun()
+    with col2:
+        st.markdown(
+            """
+            <div class="app-cadran">
+                <div class="icon">💰</div>
+                <div class="title">Nogali Finance</div>
+                <div class="desc">Suivi financier, paiements et trésorerie.</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        if st.button("Ouvrir Nogali Finance", use_container_width=True, key="hub_open_finance"):
+            st.switch_page("pages/2_Nogali_Finance.py")
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------------
+# PAGE SANS ACCES
+# ----------------------------------------------------------------------------
+elif st.session_state.page == "no_access":
+    st.error("⛔ Votre compte n'a accès à aucune application.")
+    if st.button("Se déconnecter", use_container_width=True):
+        se_deconnecter()
+        st.rerun()
+
+# ----------------------------------------------------------------------------
+# PAGE D'ACCUEIL (VERSION AVEC BOUTONS COLORÉS)
 # ----------------------------------------------------------------------------
 elif st.session_state.page == "accueil":
     afficher_barre_laterale()
     
+    st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                    padding: 1.5rem; border-radius: 10px; color: white; margin: 1rem 0;
+                    text-align: center; font-size: 1.8rem; font-weight: bold;">
+            📋 Bienvenue {st.session_state.nom} !
+        </div>
+    """, unsafe_allow_html=True)
+    
+    afficher_tableau_de_bord()
+    
+    # Gestion des utilisateurs déplacée vers la page dédiée `Gestion Utilisateurs`.
+    
+    st.markdown("---")
+    st.markdown("## 🚀 Modules disponibles")
+    
+    # CSS personnalisé pour les boutons
     st.markdown("""
         <style>
-        .welcome-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            padding: 2rem;
-            border-radius: 10px;
-            color: white;
-            margin-bottom: 2rem;
-        }
-        .welcome-title {
-            font-size: 2.5rem;
+        /* Style de base pour tous les boutons */
+        div.stButton > button {
+            border-radius: 8px;
+            padding: 0.5rem 1rem;
             font-weight: bold;
+            transition: all 0.3s ease;
+            border: none;
+            color: white;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            background: linear-gradient(145deg, #4158D0, #C850C0);
+        }
+        
+        /* Effet au survol pour tous les boutons */
+        div.stButton > button:hover {
+            filter: brightness(1.2);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        }
+        
+        /* Couleurs par module - basé sur le texte du bouton */
+        div.stButton > button:has(span:contains("IMPORT")) {
+            background: linear-gradient(135deg, #3498db, #2980b9) !important;
+        }
+        
+        div.stButton > button:has(span:contains("TÉLÉPHONE")) {
+            background: linear-gradient(135deg, #2ecc71, #27ae60) !important;
+        }
+        
+        div.stButton > button:has(span:contains("DOUBLONS")) {
+            background: linear-gradient(135deg, #e74c3c, #c0392b) !important;
+        }
+        
+        div.stButton > button:has(span:contains("FILTRE")) {
+            background: linear-gradient(135deg, #f39c12, #e67e22) !important;
+        }
+        
+        div.stButton > button:has(span:contains("VÉRIF SDA")) {
+            background: linear-gradient(135deg, #9b59b6, #8e44ad) !important;
+        }
+        
+        div.stButton > button:has(span:contains("ALERTES")) {
+            background: linear-gradient(135deg, #e74c3c, #c0392b) !important;
+        }
+        
+        div.stButton > button:has(span:contains("BASE SDA")) {
+            background: linear-gradient(135deg, #27ae60, #229954) !important;
+        }
+        
+        div.stButton > button:has(span:contains("À VENIR")) {
+            background: linear-gradient(135deg, #95a5a6, #7f8c8d) !important;
+            opacity: 0.7;
+        }
+        
+        div.stButton > button:has(span:contains("EXPORTER")) {
+            background: linear-gradient(135deg, #667eea, #764ba2) !important;
+            font-size: 1.2rem;
+            padding: 0.8rem;
         }
         </style>
     """, unsafe_allow_html=True)
     
-    st.markdown(f"""
-        <div class="welcome-header">
-            <div class="welcome-title">📋 Bienvenue {st.session_state.nom} !</div>
-        </div>
-    """, unsafe_allow_html=True)
     
-    # Tableau de bord
-    afficher_tableau_de_bord()
-    
-    # Gestion des utilisateurs (visible seulement pour admin)
-    if st.session_state.role == "admin":
-        with st.expander("🛡️ Administration - Gestion des utilisateurs", expanded=False):
-            afficher_gestion_utilisateurs()
-    
-    st.markdown("---")
-    st.subheader("🚀 Modules disponibles")
-    
-    col1, col2, col3, col4, col5 = st.columns(5)
+    # ===== SECTION 1 : GESTION DES LEADS =====
+    st.markdown("### 📊 GESTION DES LEADS")
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        afficher_carte_fonctionnalite("📂", "IMPORT", "#3498db", "import")
+        disabled = not utilisateur_a_droit(PERMISSION_IMPORT)
+        if st.button("📂 IMPORT", key="btn_import", disabled=disabled, use_container_width=True):
+            st.session_state.page = "import"
+            st.rerun()
     
     with col2:
-        disabled = st.session_state.df_original is None
-        afficher_carte_fonctionnalite("📞", "TÉLÉPHONE", "#07822a", "telephone", disabled)
+        disabled = st.session_state.df_original is None or not utilisateur_a_droit(PERMISSION_TELEPHONE)
+        if st.button("📞 TÉLÉPHONE", key="btn_telephone", disabled=disabled, use_container_width=True):
+            st.session_state.page = "telephone"
+            st.rerun()
     
     with col3:
-        disabled = st.session_state.df_original is None
-        afficher_carte_fonctionnalite("🗑️", "DOUBLONS", "#e74c3c", "doublons", disabled)
+        disabled = st.session_state.df_original is None or not utilisateur_a_droit(PERMISSION_DOUBLONS)
+        if st.button("🗑️ DOUBLONS", key="btn_doublons", disabled=disabled, use_container_width=True):
+            st.session_state.page = "doublons"
+            st.rerun()
     
     with col4:
-        disabled = st.session_state.df_original is None
-        afficher_carte_fonctionnalite("🔍", "FILTRE", "#4e12f3", "filtre", disabled)
-    with col5:
-        disabled = st.session_state.df_original is None
-        afficher_carte_fonctionnalite("🛡️", "VÉRIF SDA", "#740770", "verification_sda", disabled)
+        disabled = st.session_state.df_original is None or not utilisateur_a_droit(PERMISSION_FILTRE)
+        if st.button("🔍 FILTRE", key="btn_filtre", disabled=disabled, use_container_width=True):
+            st.session_state.page = "filtre"
+            st.rerun()
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # ===== SECTION 2 : GESTION ET SUIVI DES SDA =====
+    st.markdown("🛡️ GESTION ET SUIVI DES SDA")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        disabled = st.session_state.df_original is None or not utilisateur_a_droit(PERMISSION_VERIF_SDA)
+        if st.button("🔎 VÉRIF SDA", key="btn_verif_sda", disabled=disabled, use_container_width=True):
+            st.session_state.page = "verification_sda"
+            st.rerun()
+    if st.session_state.role in ["admin", "super_admin"]:
+        with col2:
+            disabled = not utilisateur_a_droit(PERMISSION_ALERTES)
+            if st.button("📧 ALERTES", key="btn_alertes", disabled=disabled, use_container_width=True):
+                st.session_state.page = "config_alertes"
+                st.rerun()
+        
+        with col3:
+            disabled = not utilisateur_a_droit(PERMISSION_BASE_SDA)
+            if st.button("🗄️ BASE SDA", key="btn_base_sda", disabled=disabled, use_container_width=True):
+                st.session_state.page = "gestion_sda"
+                st.rerun()
+        
+        with col4:
+            st.button("🔜 À VENIR", key="btn_a_venir", disabled=True, use_container_width=True)
+    else:
+        # Pour les non-admin, on affiche des cartes vides ou masquées
+        with col2:
+            st.empty()
+        with col3:
+            st.empty()
+        with col4:
+            st.empty()    
+    st.markdown("<br>",unsafe_allow_html=True)
+    
+    # Bouton export
     col1, col2, col3 = st.columns(3)
     with col2:
-        disabled = st.session_state.df_original is None
+        disabled = st.session_state.df_original is None or not utilisateur_a_droit(PERMISSION_EXPORT)
         if st.button("💾 EXPORTER", key="btn_export", disabled=disabled, use_container_width=True, type="primary"):
-            aller_a("export")
+            st.session_state.page = "export"
+            st.rerun()
 
 # ----------------------------------------------------------------------------
 # PAGE IMPORT (avec mode simple et mode fusion)
@@ -912,31 +1437,42 @@ elif st.session_state.page == "import":
         if uploaded_file is not None:
             try:
                 if uploaded_file.name.endswith('.csv'):
-                    # Analyser la structure
-                    uploaded_file.seek(0)
-                    sample = pd.read_csv(uploaded_file, nrows=2, header=None)
-                    nb_colonnes = len(sample.columns)
+                    # ===== NOUVEAU CODE AVEC CHARDET =====
+                    # Détection de l'encodage
+                    bytes_data = uploaded_file.getvalue()
+                    result = chardet.detect(bytes_data[:20000])
+                    encoding = result['encoding']
+                    
+                    # Détection du séparateur
+                    sample = bytes_data[:1000].decode(encoding, errors='ignore')
+                    sep = ';' if sample.count(';') > sample.count(',') else ','
+                    
+                    # Remise à zéro du pointeur
                     uploaded_file.seek(0)
                     
-                    # CAS: Une seule colonne (liste de numéros)
+                    # Analyse de la structure (1 colonne ou plusieurs)
+                    sample_df = pd.read_csv(uploaded_file, encoding=encoding, sep=sep, nrows=2, header=None)
+                    nb_colonnes = len(sample_df.columns)
+                    uploaded_file.seek(0)
+                    
+                    # CAS 1 : Une seule colonne (liste de numéros)
                     if nb_colonnes == 1:
                         st.info("📁 Format détecté : liste de numéros")
-                        enc, sep = detecter_encodage_et_separateur(uploaded_file)
-                        if enc and sep:
-                            df = pd.read_csv(uploaded_file, sep=sep, encoding=enc, header=None, names=['numero'])
-                            st.success(f"✅ {len(df)} numéros chargés")
-                        else:
-                            st.error("❌ Erreur de détection")
+                        try:
+                            df = pd.read_csv(uploaded_file, encoding=encoding, sep=sep, header=None, names=['numero'])
+                            st.success(f"✅ {len(df)} numéros chargés (Encodage: {encoding}, Séparateur: {sep})")
+                        except Exception as e:
+                            st.error(f"❌ Erreur de lecture: {e}")
                             st.stop()
                     
-                    # CAS: Plusieurs colonnes (tableau normal)
+                    # CAS 2 : Plusieurs colonnes (tableau normal)
                     else:
                         st.info(f"📁 Format détecté : tableau ({nb_colonnes} colonnes)")
-                        enc, sep = detecter_encodage_et_separateur(uploaded_file)
-                        if enc and sep:
-                            df = pd.read_csv(uploaded_file, sep=sep, encoding=enc)
-                        else:
-                            st.error("❌ Erreur de détection")
+                        try:
+                            df = pd.read_csv(uploaded_file, encoding=encoding, sep=sep)
+                            st.success(f"✅ Fichier chargé (Encodage: {encoding}, Séparateur: {sep})")
+                        except Exception as e:
+                            st.error(f"❌ Erreur de lecture: {e}")
                             st.stop()
                 
                 else:  # Fichier Excel
@@ -1521,6 +2057,185 @@ elif st.session_state.page == "filtre":
                     except Exception as e:
                         st.error(f"❌ Expression invalide: {e}")
                         filtre_func = None
+
+
+                    # ===== GESTION DES FILTRES CUMULATIFS (PANIER) =====
+            st.markdown("---")
+            st.subheader("🛒 Panier de filtres")
+
+            # Initialiser le panier
+            if 'panier_filtres' not in st.session_state:
+                st.session_state.panier_filtres = []
+
+            # Afficher les filtres déjà dans le panier
+            if st.session_state.panier_filtres:
+                st.markdown("### 📋 Filtres en attente")
+                
+                for i, filtre in enumerate(st.session_state.panier_filtres):
+                    with st.container():
+                        col1, col2, col3, col4 = st.columns([3, 2, 1, 1])
+                        
+                        with col1:
+                            st.info(f"**{filtre['colonne']}**")
+                        
+                        with col2:
+                            st.write(f"{filtre['mode']} : {filtre['critere']}")
+                        
+                        with col3:
+                            if st.button(f"✏️", key=f"edit_{i}"):
+                                # Remplir les champs avec ce filtre (à implémenter)
+                                st.session_state.filtre_en_edition = filtre
+                                st.rerun()
+                        
+                        with col4:
+                            if st.button(f"❌", key=f"remove_{i}"):
+                                st.session_state.panier_filtres.pop(i)
+                                st.rerun()
+                
+                # Mode de combinaison
+                mode_combinaison = st.radio(
+                    "Combinaison des filtres",
+                    ["🔵 ET (tous les critères)", "🟠 OU (au moins un critère)"],
+                    horizontal=True
+                )
+                
+                # Bouton pour appliquer tous les filtres
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ APPLIQUER TOUS LES FILTRES", type="primary", use_container_width=True):
+                        with st.spinner("Application des filtres..."):
+                            df_temp = st.session_state.df_original.copy()
+                            
+                            if mode_combinaison == "🔵 ET (tous les critères)":
+                                # AND : tous les filtres doivent être vrais
+                                for filtre in st.session_state.panier_filtres:
+                                    masque = df_temp[filtre['colonne']].apply(filtre['fonction'])
+                                    df_temp = df_temp[masque]
+                            else:
+                                # OR : au moins un filtre doit être vrai
+                                masque_global = pd.Series([False] * len(df_temp), index=df_temp.index)
+                                for filtre in st.session_state.panier_filtres:
+                                    masque = df_temp[filtre['colonne']].apply(filtre['fonction'])
+                                    masque_global = masque_global | masque
+                                df_temp = df_temp[masque_global]
+                            
+                            st.session_state.df_travail = df_temp.copy()
+                            sauvegarder_etat(st.session_state.df_travail)
+                            show_popup(f"✅ {len(df_temp)} résultats", "success")
+                            st.session_state.panier_filtres = []  # Vider le panier après application
+                            st.rerun()
+                
+                with col2:
+                    if st.button("🔄 VIDER LE PANIER", use_container_width=True):
+                        st.session_state.panier_filtres = []
+                        st.rerun()
+
+            else:
+                st.info("📭 Panier vide. Créez des filtres et ajoutez-les ci-dessous.")
+
+            # ===== AJOUTER LE FILTRE COURANT AU PANIER =====
+        st.markdown("---")
+        st.subheader("➕ Ajouter le filtre courant")
+
+        # Vérifier si un filtre est défini
+        if 'filtre_func' in locals() and filtre_func is not None:
+            
+            # Calculer le nombre de résultats pour ce filtre
+            try:
+                masque_test = df[col_filtre].apply(filtre_func)
+                nb_resultats_filtre = masque_test.sum()
+            except:
+                nb_resultats_filtre = 0
+            
+            # Aperçu du filtre
+            st.markdown(f"""
+            **Filtre actuel :**  
+            - Colonne : `{col_filtre}`  
+            - Mode : `{mode_filtre}`  
+            - Critères : {criteres_list if 'criteres_list' in locals() else 'N/A'}  
+            - Résultats : {nb_resultats_filtre} lignes ({nb_resultats_filtre/len(df)*100:.1f}% du total)
+            """)
+            
+            # Définir la fonction de filtrage pour le panier
+            def fonction_panier(x):
+                try:
+                    return filtre_func(x)
+                except:
+                    return False
+            
+            if st.button("➕ AJOUTER AU PANIER", use_container_width=True, type="secondary"):
+                st.session_state.panier_filtres.append({
+                    'colonne': col_filtre,
+                    'mode': mode_filtre,
+                    'critere': criteres_list if 'criteres_list' in locals() else 'N/A',
+                    'fonction': fonction_panier,
+                    'nb_resultats': nb_resultats_filtre
+                })
+                show_popup(f"✅ Filtre ajouté au panier ({nb_resultats_filtre} lignes)", "success")
+                st.rerun()
+        else:
+            st.info("👆 Configurez d'abord un filtre dans la section ci-dessus")
+
+            
+
+        # ===== NOUVEAU : EXTRACTION DE CODES POSTAUX =====
+            st.markdown("---")
+            st.subheader("📍 Extraction de codes postaux")
+
+            if st.session_state.df_travail is not None:
+                df = st.session_state.df_travail
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Choisir la colonne source
+                    colonnes_adresse = [col for col in df.columns if any(
+                        x in col.lower() for x in ['adresse', 'address', 'ville', 'lieu', 'rue']
+                    )]
+                    if not colonnes_adresse:
+                        colonnes_adresse = df.columns.tolist()
+                    
+                    col_source = st.selectbox(
+                        "Colonne contenant les adresses",
+                        colonnes_adresse,
+                        key="col_source_cp"
+                    )
+                
+                with col2:
+                    # Nom de la nouvelle colonne
+                    nouveau_nom = st.text_input(
+                        "Nom de la nouvelle colonne",
+                        value="code_postal",
+                        key="nom_col_cp"
+                    )
+                
+                if st.button("🔍 EXTRAIRE LES CODES POSTAUX", type="secondary"):
+                    with st.spinner("Extraction en cours..."):
+                        # 👇 CONVERTIR LA COLONNE SOURCE EN TEXTE AVANT TOUT
+                        colonne_source_texte = df[col_source].astype(str)
+                        
+                        # Extraire les codes
+                        codes = colonne_source_texte.apply(extraire_code_postal)
+                        
+                        # Stocker dans une colonne texte
+                        st.session_state.df_travail[nouveau_nom] = codes.astype(str)
+                        
+                        # Compter les résultats
+                        nb_extraits = st.session_state.df_travail[nouveau_nom].str.match(r'^\d{5}$').sum()
+                        
+                        show_popup(f"✅ {nb_extraits} codes postaux extraits", "success")
+                        
+                        # Aperçu
+                        apercu = df[[col_source, nouveau_nom]].head(10)
+                        st.dataframe(apercu, use_container_width=True)
+                        
+                        # Bouton pour valider l'extraction
+                        if st.button("✅ VALIDER CETTE EXTRACTION"):
+                            sauvegarder_etat(st.session_state.df_travail)
+                            show_popup("✅ Extraction validée et sauvegardée", "success")
+                            st.rerun()
+            # ===== FIN DE LA NOUVELLE SECTION =====        
+            
             else:
                 filtre_func = None
             
@@ -1987,40 +2702,58 @@ elif st.session_state.page == "verification_sda":
                 st.markdown(f"**📞 {row['number']}**")
                 
                 ni = row.get('numeroinconnu', {})
-                if ni:
-                    pct = ni.get('danger_percentage', 0)
-                    
-                    # Barre de progression
-                    color = "red" if pct >= 70 else "orange" if pct >= 50 else "green"
-                    
-                    st.markdown(f"**Danger : {pct}%**")
-                    st.markdown(f"""
-                        <div style="width:100%; background:#ddd; border-radius:5px;">
-                            <div style="width:{pct}%; background:{color}; border-radius:5px; height:20px; text-align:center; color:white;">
-                                {pct}%
-                            </div>
+                
+                # 👇 VÉRIFIER LES ERREURS EN PRIORITÉ
+                if ni.get('error'):
+                    st.error(f"❌ {ni['error']}")
+                    st.markdown("---")
+                    continue
+                
+                # 👇 VÉRIFIER LES ÉCHECS (ancienne méthode)
+                if ni.get('comments') and any("échouée" in c for c in ni['comments']):
+                    st.error(f"❌ Vérification échouée pour {row['number']}")
+                    st.markdown("---")
+                    continue
+                
+                # 👇 SI PAS DE DONNÉES
+                if not ni or (ni.get('danger_percentage') == 0 and not ni.get('comments')):
+                    st.info(f"ℹ️ Aucune information sur ce numéro")
+                    st.markdown("---")
+                    continue
+                
+                # 👇 AFFICHAGE NORMAL
+                pct = ni.get('danger_percentage', 0)
+                
+                # Barre de progression
+                color = "red" if pct >= 70 else "orange" if pct >= 50 else "green"
+                
+                st.markdown(f"**Danger : {pct}%**")
+                st.markdown(f"""
+                    <div style="width:100%; background:#ddd; border-radius:5px;">
+                        <div style="width:{pct}%; background:{color}; border-radius:5px; height:20px; text-align:center; color:white;">
+                            {pct}%
                         </div>
-                    """, unsafe_allow_html=True)
-                    
-                    # Statistiques
-                    stats = []
-                    if ni.get('visits'):
-                        stats.append(f"👁️ {ni['visits']} visites")
-                    if ni.get('last_visit'):
-                        stats.append(f"📅 {ni['last_visit']}")
-                    if ni.get('comments_count'):
-                        stats.append(f"💬 {ni['comments_count']} commentaires")
-                    
-                    if stats:
-                        st.markdown(" | ".join(stats))
-                    
-                    # Commentaires
-                    if ni.get('comments'):
-                        st.markdown("**Commentaires:**")
-                        for c in ni['comments']:
+                    </div>
+                """, unsafe_allow_html=True)
+                
+                # Statistiques
+                stats = []
+                if ni.get('visits'):
+                    stats.append(f"👁️ {ni['visits']} visites")
+                if ni.get('last_visit'):
+                    stats.append(f"📅 {ni['last_visit']}")
+                if ni.get('comments_count'):
+                    stats.append(f"💬 {ni['comments_count']} commentaires")
+                
+                if stats:
+                    st.markdown(" | ".join(stats))
+                
+                # Commentaires
+                if ni.get('comments'):
+                    st.markdown("**Commentaires:**")
+                    for c in ni['comments']:
+                        if not "échouée" in c:
                             st.markdown(f"- {c}")
-                else:
-                    st.markdown("*Pas de données Numeroinconnu*")
                 
                 st.markdown("---")
     # ===== EXPORT SÉLECTIF =====
@@ -2062,4 +2795,497 @@ elif st.session_state.page == "verification_sda":
             use_container_width=True,
             key="download_btn_final"
         )    
+# ----------------------------------------------------------------------------
+# PAGE GESTION BASE SDA
+# ----------------------------------------------------------------------------
+elif st.session_state.page == "gestion_sda":
+    st.title("📇 Gestion de la Base SDA")
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        if st.button("← Retour", use_container_width=True):
+            st.session_state.page = "accueil"
+            st.rerun()
    
+     
+    # Initialiser le gestionnaire
+    if 'sda_manager' not in st.session_state:
+        st.session_state.sda_manager = SDAManager()
+    
+    # Navigation interne
+    onglet = st.radio(
+        "Section",
+        ["📤 Import", "📋 Visualisation", "📊 Statistiques", "🔍 Vérification"],
+        horizontal=True
+    )
+    
+    if onglet == "📤 Import":
+        st.subheader("Importer des numéros par prestataire")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            prestataire = st.text_input("Nom du prestataire/fournisseur")
+        
+        with col2:
+            uploaded_file = st.file_uploader(
+                "Fichier CSV ou Excel",
+                type=['csv', 'xlsx', 'xls']
+            )
+        
+        if uploaded_file and prestataire:
+            # Aperçu
+            if uploaded_file.name.endswith('.csv'):
+                df_preview = pd.read_csv(uploaded_file, nrows=5)
+            else:
+                df_preview = pd.read_excel(uploaded_file, nrows=5)
+            
+            st.write("Aperçu du fichier :")
+            st.dataframe(df_preview)
+            
+            # Choix de la colonne
+            colonne = st.selectbox("Colonne contenant les numéros", df_preview.columns)
+            
+            if st.button("🚀 IMPORTER", type="primary"):
+                with st.spinner("Import en cours..."):
+                    resultat = st.session_state.sda_manager.importer_numeros(
+                        uploaded_file, prestataire, colonne
+                    )
+                    if resultat['erreur']:
+                        st.error(f"❌ {resultat['erreur']}")
+                    else:
+                        st.success(f"""
+                        ✅ Import terminé !
+                        - Prestataire : {resultat['prestataire']}
+                        - Numéros dans le fichier : {resultat['total_fichier']}
+                        - Numéros importés : {resultat['importes']}
+                        """)
+    
+    elif onglet == "📋 Visualisation":
+        st.subheader("📋 Visualisation des numéros par prestataire")
+        
+        conn = sqlite3.connect('sda_database.db')
+        prestataires = pd.read_sql("SELECT nom FROM prestataires", conn)['nom'].tolist()
+        
+        if prestataires:
+            choix = st.selectbox("Choisir un prestataire", ["Tous"] + prestataires)
+            
+            # Récupérer les données
+            if choix == "Tous":
+                df = pd.read_sql('''
+                    SELECT n.id, n.numero, n.prestataire_id, n.type_ligne, 
+                        n.danger_percentage, n.niveau_danger, n.derniere_verification,
+                        p.nom as prestataire_nom 
+                    FROM numeros_sda n
+                    JOIN prestataires p ON n.prestataire_id = p.id
+                ''', conn)
+            else:
+                df = pd.read_sql('''
+                    SELECT n.id, n.numero, n.prestataire_id, n.type_ligne,
+                        n.danger_percentage, n.niveau_danger, n.derniere_verification,
+                        p.nom as prestataire_nom 
+                    FROM numeros_sda n
+                    JOIN prestataires p ON n.prestataire_id = p.id
+                    WHERE p.nom = ?
+                ''', conn, params=[choix])
+            
+            conn.close()
+            
+            # Filtre rapide sur les échecs techniques
+            show_only_failures = st.checkbox("❌ Afficher uniquement les échecs de vérification", value=False)
+            if show_only_failures:
+                df = df[df['niveau_danger'].fillna('').astype(str).str.startswith('❌')].copy()
+                st.info(f"{len(df)} numéro(x) en échec affiché(s).")
+
+            # ===== SÉLECTION MULTIPLE AVEC CHECKBOXES =====
+            st.markdown("---")
+            st.subheader("✅ Sélectionner des numéros à supprimer")
+            
+            # Initialiser la colonne de sélection
+            if 'select_all' not in st.session_state:
+                st.session_state.select_all = False
+            
+            # Boutons de sélection rapide
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                if st.button("✓ TOUT SÉLECTIONNER"):
+                    st.session_state.select_all = True
+                    st.rerun()
+            with col2:
+                if st.button("✗ TOUT DÉSÉLECTIONNER"):
+                    st.session_state.select_all = False
+                    st.rerun()
+            with col3:
+                st.write(f"📊 Total: {len(df)} numéros")
+            
+            # Créer le DataFrame avec la colonne de sélection
+            df_display = df[['numero', 'prestataire_nom', 'danger_percentage', 'niveau_danger', 'derniere_verification']].copy()
+            df_display['etat_verification'] = df_display['niveau_danger'].apply(
+                lambda x: "❌ Échec" if isinstance(x, str) and x.startswith("❌") else "✅ OK"
+            )
+            
+            # Ajouter la colonne de sélection
+            if st.session_state.select_all:
+                df_display['Sélectionner'] = True
+            else:
+                df_display['Sélectionner'] = False
+            
+            # Afficher le tableau éditable
+            edited_df = st.data_editor(
+                df_display,
+                column_config={
+                    "Sélectionner": st.column_config.CheckboxColumn(
+                        "✅",
+                        help="Cocher pour supprimer",
+                        default=False
+                    ),
+                    "numero": "Numéro",
+                    "prestataire_nom": "Prestataire",
+                    "danger_percentage": "Danger %",
+                    "niveau_danger": "Niveau",
+                    "derniere_verification": "Dernière vérif",
+                    "etat_verification": "État vérif"
+                },
+                disabled=['numero', 'prestataire_nom', 'danger_percentage', 'niveau_danger', 'derniere_verification', 'etat_verification'],
+                use_container_width=True,
+                key="data_editor"
+            )
+            
+            # Récupérer les numéros sélectionnés
+            numeros_selectionnes = edited_df[edited_df['Sélectionner'] == True]
+            nb_selectionnes = len(numeros_selectionnes)
+            
+            if nb_selectionnes > 0:
+                st.warning(f"📌 {nb_selectionnes} numéro(s) sélectionné(s)")
+                
+                if st.button("🗑️ SUPPRIMER LA SÉLECTION", type="primary"):
+                    st.session_state.confirmation = True
+                    st.session_state.numeros_a_supprimer = numeros_selectionnes['numero'].tolist()
+                    st.rerun()
+            
+            # ===== CONFIRMATION DE SUPPRESSION =====
+            if 'confirmation' in st.session_state and st.session_state.confirmation:
+                st.markdown("---")
+                st.error(f"🚨 Confirmation de suppression de {len(st.session_state.numeros_a_supprimer)} numéro(s) :")
+                
+                # Afficher la liste des numéros à supprimer
+                for num in st.session_state.numeros_a_supprimer:
+                    st.write(f"- {num}")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✅ OUI, SUPPRIMER", type="primary"):
+                        conn = sqlite3.connect('sda_database.db')
+                        cursor = conn.cursor()
+                        
+                        supprimes = 0
+                        for num in st.session_state.numeros_a_supprimer:
+                            # Récupérer l'ID du numéro
+                            cursor.execute("SELECT id FROM numeros_sda WHERE numero = ?", (num,))
+                            result = cursor.fetchone()
+                            if result:
+                                numero_id = result[0]
+                                # Supprimer l'historique
+                                cursor.execute("DELETE FROM historique_verifications WHERE numero_id = ?", (numero_id,))
+                                # Supprimer le numéro
+                                cursor.execute("DELETE FROM numeros_sda WHERE id = ?", (numero_id,))
+                                supprimes += 1
+                        
+                        conn.commit()
+                        conn.close()
+                        
+                        st.success(f"✅ {supprimes} numéro(s) supprimé(s) avec succès !")
+                        
+                        # Nettoyer la session
+                        del st.session_state.confirmation
+                        del st.session_state.numeros_a_supprimer
+                        st.session_state.select_all = False
+                        st.rerun()
+                
+                with col2:
+                    if st.button("❌ NON, ANNULER"):
+                        del st.session_state.confirmation
+                        del st.session_state.numeros_a_supprimer
+                        st.rerun()
+            
+            # Export de la vue
+            st.markdown("---")
+            st.subheader("📤 Export")
+            csv = df.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 Exporter cette vue",
+                data=csv,
+                file_name=f"sda_{choix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+        
+        else:
+            conn.close()
+            st.info("📭 Aucun prestataire pour le moment. Commencez par importer des numéros.")
+    
+    elif onglet == "📊 Statistiques":
+        st.subheader("📊 Tableau de bord SDA")
+        
+        stats = st.session_state.sda_manager.get_statistiques_globales()
+        
+        # KPIs principaux
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric("📞 Total SDA", stats['total'])
+        with col2:
+            st.metric("✅ Vérifiés", stats['verifies'], f"{stats['verifies']/max(stats['total'],1)*100:.1f}%")
+        with col3:
+            st.metric("🟢 Opérationnels", stats['sains'])
+        with col4:
+            st.metric("🔴 Spammés", stats['spams'])
+        with col5:
+            st.metric("❌ Échecs", stats.get('echecs', 0))
+        
+        # Graphiques
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Répartition par statut (camembert)
+            if stats['total'] > 0:
+                import plotly.express as px
+                df_status = pd.DataFrame({
+                    'Statut': ['🟢 Opérationnels', '🔴 Spammés', '❌ Échecs'],
+                    'Nombre': [stats['sains'], stats['spams'], stats.get('echecs', 0)]
+                })
+                fig = px.pie(df_status, values='Nombre', names='Statut', 
+                            title='Répartition des numéros',
+                            color_discrete_sequence=['#2ecc71', '#e74c3c', '#f39c12'])
+                st.plotly_chart(fig, use_container_width=True)
+        
+        with col2:
+            # Répartition par prestataire (barres)
+            if not stats['par_prestataire'].empty:
+                fig_bar = px.bar(stats['par_prestataire'], 
+                            x='nom', y=['total', 'spams', 'echecs'],
+                            title='Numéros par prestataire',
+                            barmode='group',
+                            labels={'value': 'Nombre', 'nom': 'Prestataire'})
+                st.plotly_chart(fig_bar, use_container_width=True)
+        
+        # Tableau détaillé par prestataire
+        st.subheader("🏢 Détail par prestataire")
+        
+        # Ajouter les colonnes de pourcentage
+        df_prest = stats['par_prestataire'].copy()
+        df_prest['% spam'] = (df_prest['spams'] / df_prest['total'].replace(0, 1) * 100).round(1).astype(str) + '%'
+        df_prest['% échecs'] = (df_prest['echecs'] / df_prest['total'].replace(0, 1) * 100).round(1).astype(str) + '%'
+        df_prest['ratio'] = df_prest['spams'].astype(str) + '/' + df_prest['total'].astype(str)
+        
+        st.dataframe(df_prest[['nom', 'total', 'spams', 'echecs', '% spam', '% échecs', 'ratio']], 
+                    use_container_width=True)
+        
+        # Dernières vérifications
+        st.subheader("🕒 Dernières vérifications")
+        
+        conn = sqlite3.connect('sda_database.db')
+        dernieres = pd.read_sql('''
+            SELECT n.numero, p.nom as prestataire, 
+                h.danger_percentage, h.niveau_danger,
+                h.date_verification
+            FROM historique_verifications h
+            JOIN numeros_sda n ON h.numero_id = n.id
+            JOIN prestataires p ON n.prestataire_id = p.id
+            ORDER BY h.date_verification DESC
+            LIMIT 20
+        ''', conn)
+        conn.close()
+        
+        if not dernieres.empty:
+            st.dataframe(dernieres, use_container_width=True)
+        else:
+            st.info("Aucune vérification pour l'instant")
+
+    elif onglet == "🔍 Vérification":
+        st.subheader("Vérification des numéros")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("### 🎯 Vérification manuelle")
+            
+            # Choix du mode
+            mode_verif = st.radio(
+                "Sélectionner les numéros à vérifier",
+                ["Tous les numéros", "Par prestataire", "Numéro spécifique"]
+            )
+            
+            if mode_verif == "Par prestataire":
+                conn = sqlite3.connect('sda_database.db')
+                prestataires = pd.read_sql("SELECT nom FROM prestataires", conn)['nom'].tolist()
+                conn.close()
+                
+                if prestataires:
+                    choix_prest = st.selectbox("Choisir un prestataire", prestataires)
+                else:
+                    st.warning("Aucun prestataire trouvé")
+                    choix_prest = None
+            
+            elif mode_verif == "Numéro spécifique":
+                numero_spec = st.text_input("Entrer le numéro à vérifier")
+            
+            # Bouton de vérification
+            force_recheck = st.checkbox("🔁 Forcer la re-vérification (même déjà vérifiés)", value=False)
+            if st.button("🚀 LANCER VÉRIFICATION", type="primary"):
+                with st.spinner("Vérification en cours..."):
+                    if mode_verif == "Tous les numéros":
+                        resultat = st.session_state.sda_manager.verifier_lot(limite=None, force=force_recheck)
+                    elif mode_verif == "Par prestataire" and choix_prest:
+                        resultat = st.session_state.sda_manager.verifier_lot(choix_prest, limite=None, force=force_recheck)
+                    elif mode_verif == "Numéro spécifique" and numero_spec:
+                        # Chercher l'ID du numéro
+                        conn = sqlite3.connect('sda_database.db')
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT id FROM numeros_sda WHERE numero = ?", (numero_spec,))
+                        result = cursor.fetchone()
+                        conn.close()
+                        
+                        if result:
+                            st.session_state.sda_manager.verifier_et_mettre_a_jour(result[0], numero_spec)
+                            resultat = {"message": f"✅ Numéro {numero_spec} vérifié", "verifies": 1}
+                        else:
+                            resultat = {"message": "❌ Numéro non trouvé dans la base", "verifies": 0}
+                    
+                    st.success(resultat['message'])
+        
+        with col2:
+            st.markdown("### ⏰ Vérification programmée")
+            st.info("""
+            **Fonctionnalité à venir :**
+            - Planification quotidienne
+            - Alertes automatiques
+            - Rapport par email
+            """)
+            
+            heure = st.time_input("Heure de vérification quotidienne", value=datetime.now().time())
+            
+            if st.button("⏰ PROGRAMMER"):
+                st.success(f"✅ Vérification programmée tous les jours à {heure}")
+
+
+# ----------------------------------------------------------------------------
+# PAGE CONFIGURATION ALERTES
+# ----------------------------------------------------------------------------
+elif st.session_state.page == "config_alertes":
+    st.title("📧 Configuration des alertes email")
+    
+    # Bouton retour
+    col1, col2 = st.columns([1, 5])
+    with col1:
+        if st.button("← Retour", use_container_width=True):
+            st.session_state.page = "accueil"
+            st.rerun()
+    
+    # Afficher un message si une config existe
+    if st.session_state.config_chargee:
+        st.success("✅ Configuration SMTP chargée automatiquement")
+    
+    # Formulaire de configuration
+    config = st.session_state.alerter.config if st.session_state.alerter else None
+    with st.form("form_config_email"):
+        st.subheader("📧 Configuration SMTP")
+        
+        # Valeurs par défaut depuis la config existante
+        default_smtp = st.session_state.alerter.config['smtp_server'] if st.session_state.alerter.config else "smtp.gmail.com"
+        default_port = st.session_state.alerter.config['smtp_port'] if st.session_state.alerter.config else 587
+        default_email = st.session_state.alerter.config['email'] if st.session_state.alerter.config else ""
+        default_dest = '\n'.join(st.session_state.alerter.config['destinataires']) if st.session_state.alerter.config else ""
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            smtp_server = st.text_input("Serveur SMTP", value=default_smtp)
+            email = st.text_input("Adresse email expéditrice", value=default_email)
+        
+        with col2:
+            smtp_port = st.number_input("Port SMTP", value=default_port)
+            password = st.text_input("Mot de passe", type="password", value= config['password'] if config else "" )
+        
+        st.subheader("📬 Destinataires")
+        destinataires = st.text_area(
+            "Adresses email (une par ligne)",
+            value=default_dest,
+            placeholder="alert@example.com\nresponsable@example.com"
+        )
+        
+        if st.form_submit_button("💾 Enregistrer la configuration"):
+            liste_dest = [d.strip() for d in destinataires.split('\n') if d.strip()]
+            
+            # Sauvegarder dans la base
+            st.session_state.alerter.sauvegarder_config(
+                smtp_server, smtp_port, email, password, liste_dest
+            )
+            st.session_state.config_chargee = True
+            st.success("✅ Configuration enregistrée et sauvegardée !")
+
+    #  NOUVELLE SECTION PLANIFICATION
+    st.markdown("---")
+    st.subheader("⏰ Planification automatique")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        # Afficher l'heure actuelle programmée
+        if st.session_state.scheduler.heure_programmee:
+            st.info(f"⏰ Actuellement programmé à : {st.session_state.scheduler.heure_programmee}")
+        
+        # Heure par défaut = dernière programmation ou 08:00
+        heure_defaut = datetime.strptime(
+            st.session_state.scheduler.heure_programmee if st.session_state.scheduler.heure_programmee else "08:00", 
+            "%H:%M"
+        ).time()
+        
+        nouvelle_heure = st.time_input("Heure de vérification quotidienne", value=heure_defaut)
+        
+        if st.button("✅ PROGRAMMER", type="primary"):
+            heure_str = nouvelle_heure.strftime("%H:%M")
+            st.session_state.scheduler.programmer(heure_str)
+            st.success(f"✅ Vérification programmée tous les jours à {heure_str}")
+            st.rerun()
+
+    with col2:
+        if st.button("⏹️ ARRÊTER LA PLANIFICATION"):
+            if st.session_state.scheduler:
+                st.session_state.scheduler.arreter()
+                st.session_state.scheduler.heure_programmee = None
+                st.warning("⏸️ Planification arrêtée")
+                st.rerun()
+        
+        if st.button("🚀 TESTER MAINTENANT"):
+            with st.spinner("Exécution de la vérification..."):
+                st.session_state.scheduler.job_verification()
+                st.success("✅ Vérification terminée !")
+    
+    # Dans la page ALERTES, remplace la section test par :
+
+    st.markdown("---")
+    st.subheader("🔍 Test avec vrais spams")
+
+    # Initialiser la variable de session pour les spams
+    if 'nouveaux_spams' not in st.session_state:
+        st.session_state.nouveaux_spams = None
+
+    if st.button("🔍 Vérifier les nouveaux spams"):
+        with st.spinner("Recherche des nouveaux spams..."):
+            nouveaux = st.session_state.alerter.verifier_nouveaux_spams()
+            
+            if not nouveaux.empty:
+                st.session_state.nouveaux_spams = nouveaux
+                st.success(f"🚨 {len(nouveaux)} nouveaux spams détectés !")
+                st.dataframe(nouveaux, use_container_width=True)
+            else:
+                st.session_state.nouveaux_spams = None
+                st.info("✅ Aucun nouveau spam détecté")
+
+    # Afficher le bouton d'envoi seulement si des spams sont stockés
+    if st.session_state.nouveaux_spams is not None and not st.session_state.nouveaux_spams.empty:
+        if st.button("📨 Envoyer l'alerte pour ces spams"):
+            with st.spinner("Envoi en cours..."):
+                resultat = st.session_state.alerter.envoyer_alerte_spams(st.session_state.nouveaux_spams)
+                if resultat:
+                    st.success(f"✅ Alerte envoyée pour {len(st.session_state.nouveaux_spams)} spams !")
+                    # Optionnel : effacer après envoi
+                    # st.session_state.nouveaux_spams = None
+                else:
+                    st.error("❌ Échec de l'envoi")
+
