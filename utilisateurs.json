@@ -1,0 +1,29 @@
+{
+  "admin": {
+    "nom": "Administrateur",
+    "mot_de_passe": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+    "role": "admin",
+    "permissions": {
+      "access_admin_leads_pro": true,
+      "access_nogali_finance": true,
+      "access_module_import": true,
+      "access_module_telephone": true,
+      "access_module_doublons": true,
+      "access_module_filtre": true,
+      "access_module_export": true,
+      "access_module_verif_sda": true,
+      "access_module_alertes": true,
+      "access_module_base_sda": true,
+      "access_fin_dashboard": true,
+      "access_fin_mensuel": true,
+      "access_fin_suivi": true
+    },
+    "date_creation": "2026-04-10T17:29:10.177155"
+  },
+  "superadmin":{
+    "nom": "Super Administrateur",
+    "mot_de_passe": "3c9909afec25354d551dae21590bb26e38d53f2173b8d3dc3eee4c047e7ab1c1",
+    "role": "super_admin",
+    "date_creation": "2026-04-10T10:00:00"
+  }
+}
